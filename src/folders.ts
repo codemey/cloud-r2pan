@@ -5,6 +5,7 @@ import { encryptSecret, decryptSecret } from "./crypto";
 import { getSettings } from "./settings";
 import { verifyOAuthSession } from "./oauth";
 import { json } from "./pages";
+import { createStorageProvider } from "./storage";
 import {
   hashPassword, verifyPassword, issueToken, verifyShareToken, streamFile,
   isTurnstileEnabled, getTurnstileInfo, verifyTurnstileToken,
@@ -105,19 +106,51 @@ export async function handleFolderAdmin(req: Request, env: Env, path: string): P
   if (path === "/api/admin/folders" && req.method === "DELETE") {
     const folderPath = validPath(new URL(req.url).searchParams.get("path"));
     if (!folderPath) return json({ error: "Invalid folder path" }, { status: 400 });
-    const existing = await env.db.prepare("SELECT 1 FROM directories WHERE path = ?1").bind(folderPath).first();
-    if (!existing) return json({ error: "Folder not found" }, { status: 404 });
+    if (!(await folderExists(env, folderPath))) return json({ error: "Folder not found" }, { status: 404 });
     const [lower, upper] = bounds(folderPath);
-    const [file, directory] = await Promise.all([
-      env.db.prepare("SELECT 1 FROM files WHERE path >= ?1 AND path < ?2 LIMIT 1").bind(lower, upper).first(),
-      env.db.prepare("SELECT 1 FROM directories WHERE path >= ?1 AND path < ?2 LIMIT 1").bind(lower, upper).first(),
-    ]);
-    if (file || directory) return json({ error: "Folder is not empty" }, { status: 409 });
+    const pending = await env.db.prepare(
+      `SELECT id, key, r2_upload_id FROM upload_sessions WHERE completed_file_id IS NULL
+       AND (path = ?1 OR (path >= ?2 AND path < ?3)) LIMIT 5`
+    ).bind(folderPath, lower, upper).all<{ id: string; key: string; r2_upload_id: string }>();
+    if (pending.results.length) {
+      if (!env.r2) return json({ error: "R2 binding missing" }, { status: 500 });
+      for (const session of pending.results) {
+        const object = await env.r2.head(session.key);
+        if (object) await env.r2.delete(session.key);
+        else {
+          try { await env.r2.resumeMultipartUpload(session.key, session.r2_upload_id).abort(); }
+          catch (error) {
+            if (!/NoSuchUpload|10024/.test(String((error as Error)?.message ?? error))) throw error;
+          }
+        }
+        await env.db.batch([
+          env.db.prepare("DELETE FROM upload_parts WHERE session_id = ?1").bind(session.id),
+          env.db.prepare("DELETE FROM upload_sessions WHERE id = ?1").bind(session.id),
+        ]);
+      }
+      return json({ ok: true, done: false, removed: pending.results.length });
+    }
+    const files = await env.db.prepare(
+      "SELECT id, key FROM files WHERE path >= ?1 AND path < ?2 LIMIT 10"
+    ).bind(lower, upper).all<{ id: string; key: string }>();
+    if (files.results.length) {
+      const st = await createStorageProvider(env, await getSettings(env));
+      for (const file of files.results) await st.delete(file.key);
+      const ids = files.results.map(file => file.id);
+      const placeholders = ids.map((_, i) => `?${i + 1}`).join(",");
+      await env.db.batch([
+        env.db.prepare(`DELETE FROM shares WHERE file_id IN (${placeholders})`).bind(...ids),
+        env.db.prepare(`DELETE FROM direct_links WHERE file_id IN (${placeholders})`).bind(...ids),
+        env.db.prepare(`DELETE FROM download_logs WHERE file_id IN (${placeholders})`).bind(...ids),
+        env.db.prepare(`DELETE FROM files WHERE id IN (${placeholders})`).bind(...ids),
+      ]);
+      return json({ ok: true, done: false, removed: ids.length });
+    }
     await env.db.batch([
-      env.db.prepare("DELETE FROM folder_shares WHERE path = ?1").bind(folderPath),
-      env.db.prepare("DELETE FROM directories WHERE path = ?1").bind(folderPath),
+      env.db.prepare("DELETE FROM folder_shares WHERE path = ?1 OR (path >= ?2 AND path < ?3)").bind(folderPath, lower, upper),
+      env.db.prepare("DELETE FROM directories WHERE path = ?1 OR (path >= ?2 AND path < ?3)").bind(folderPath, lower, upper),
     ]);
-    return json({ ok: true });
+    return json({ ok: true, done: true });
   }
 
   if (path === "/api/admin/folder-shares" && req.method === "POST") {
@@ -217,7 +250,7 @@ export async function handleFolderPublic(req: Request, env: Env, ctx: ExecutionC
 
   if (action === "manifest" && req.method === "GET") {
     const [files, dirs] = await Promise.all([
-      rowsInFolder<FileRow>(env, "files", row.path),
+      rowsInFolder<FileRow & { path: string }>(env, "files", row.path),
       rowsInFolder<{ path: string }>(env, "directories", row.path),
     ]);
     const directoryPaths = new Set(dirs.map((d) => d.path.slice(row.path.length + 1)));
@@ -233,7 +266,7 @@ export async function handleFolderPublic(req: Request, env: Env, ctx: ExecutionC
     const [lower, upper] = bounds(row.path);
     const file = await env.db.prepare(
       "SELECT id, key, name, size, mime, path FROM files WHERE id = ?1 AND path >= ?2 AND path < ?3"
-    ).bind(fileId, lower, upper).first<FileRow>();
+    ).bind(fileId, lower, upper).first<FileRow & { path: string }>();
     if (!file) return json({ error: "file_not_found" }, { status: 404 });
     const ip = clientIp(req);
     const ban = await env.db.prepare("SELECT expires_at FROM banned_ips WHERE ip = ?1").bind(ip).first<{ expires_at: number | null }>();

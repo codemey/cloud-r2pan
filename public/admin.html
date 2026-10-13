@@ -1421,7 +1421,11 @@ async function api(path, opts={}){
   let data = null;
   try { data = await r.json(); } catch {}
   if(r.status === 401 && !path.includes('/login')) { showLogin(); throw new Error('unauthorized'); }
-  if(!r.ok) throw new Error(data?.error || `HTTP ${r.status}`);
+  if(!r.ok) {
+    const error = new Error(data?.error || `HTTP ${r.status}`);
+    error.status = r.status;
+    throw error;
+  }
   return data;
 }
 
@@ -1861,17 +1865,7 @@ async function loadFiles(){
     api('/api/admin/files'), api('/api/admin/folders'), api('/api/admin/upload/multipart')
   ]);
   if(version !== filesLoadVersion || currentTab !== 'files') return;
-  const superseded = sessions.filter(s => !activeUploadSessions.has(s.id) &&
-    allFiles.some(f => f.name === s.name && f.size === s.size &&
-      f.path === (s.path === '/' ? `/${s.name}` : `${s.path}/${s.name}`) && f.uploaded_at > s.created_at)).slice(0, 10);
-  const cleaned = await Promise.allSettled(superseded.map(async s => {
-    await api(`/api/admin/upload/multipart/${s.id}`, { method:'DELETE' });
-    forgetUploadSession(s.id);
-    return s.id;
-  }));
-  const cleanedIds = new Set(cleaned.filter(r => r.status === 'fulfilled').map(r => r.value));
-  const pendingUploads = sessions.filter(s => !cleanedIds.has(s.id));
-  if(version !== filesLoadVersion || currentTab !== 'files') return;
+  const pendingUploads = sessions;
   if(_fileDir !== '/' && !folders.includes(_fileDir)) _fileDir = '/';
   const files = allFiles.filter(f => folderParent(f.path || `/${f.name}`) === _fileDir);
   const children = folders.filter(path => folderParent(path) === _fileDir);
@@ -1914,7 +1908,7 @@ async function loadFiles(){
     </div>` : ''}
     <div class="glass section">
       <div class="section-title" style="gap:12px;flex-wrap:wrap"><h2>📁 ${esc(_fileDir === '/' ? t('allFiles') : _fileDir)}（${files.length + children.length}）</h2>
-        <div class="row" style="gap:8px;flex-wrap:wrap"><button class="btn sm" id="new-folder">${LANG === 'zh' ? '新建文件夹' : 'New folder'}</button>
+        <div class="row" style="gap:8px;flex-wrap:wrap"><button class="btn sm" id="sync-storage">${LANG === 'zh' ? '同步存储' : 'Sync storage'}</button><button class="btn sm" id="new-folder">${LANG === 'zh' ? '新建文件夹' : 'New folder'}</button>
         ${_fileDir !== '/' ? `<button class="btn sm primary" id="share-folder">${LANG === 'zh' ? '分享此文件夹' : 'Share folder'}</button>` : ''}</div></div>
       <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px">${crumbs.map(c=>`<button class="btn sm" data-folder="${esc(c.path)}">${esc(c.name)}</button>`).join('')}</div>
       ${files.length || children.length ? `
@@ -1994,12 +1988,56 @@ async function loadFiles(){
   $$('[data-folder]').forEach(b => b.onclick = () => { _fileDir=b.dataset.folder; loadFiles(); });
   $$('[data-share-folder]').forEach(b => b.onclick = () => openFolderShareModal(b.dataset.shareFolder));
   $$('[data-delete-folder]').forEach(b => b.onclick = async () => {
+    const folder = b.dataset.deleteFolder;
+    const descendantFiles = allFiles.filter(f => f.path.startsWith(folder + '/')).length;
+    const descendantFolders = folders.filter(path => path.startsWith(folder + '/')).length;
     if(!(await confirmDialog(LANG === 'zh' ? '删除文件夹' : 'Delete folder',
-      LANG === 'zh' ? '只能删除空文件夹。' : 'Only empty folders can be deleted.'))) return;
-    try { await api(`/api/admin/folders?path=${encodeURIComponent(b.dataset.deleteFolder)}`, { method:'DELETE' });
-      toast(LANG === 'zh' ? '文件夹已删除' : 'Folder deleted'); loadFiles(); }
+      LANG === 'zh' ? `将永久删除 ${folder}、其中 ${descendantFiles} 个文件、${descendantFolders} 个子文件夹及关联分享。确定继续？` :
+        `Permanently delete ${folder}, ${descendantFiles} files, ${descendantFolders} subfolders and related shares?`, true))) return;
+    b.disabled = true;
+    const originalLabel = b.textContent;
+    let removed = 0;
+    try {
+      for(;;){
+        const result = await api(`/api/admin/folders?path=${encodeURIComponent(folder)}`, { method:'DELETE' });
+        removed += result.removed || 0;
+        b.textContent = LANG === 'zh' ? `已删除 ${removed}` : `Removed ${removed}`;
+        if(result.done) break;
+      }
+      toast(LANG === 'zh' ? '文件夹及内容已删除' : 'Folder and contents deleted'); loadFiles(); }
     catch(e){toast(e.message,'err');}
+    finally { b.disabled = false; b.textContent = originalLabel; }
   });
+  $('#sync-storage').onclick = async e => {
+    const button = e.currentTarget;
+    button.disabled = true;
+    let after = '', checked = 0, removed = 0;
+    const missing = [];
+    try {
+      for(;;){
+        const result = await api('/api/admin/files/reconcile', { method:'POST', body:JSON.stringify({ after }) });
+        checked += result.checked;
+        missing.push(...result.missing);
+        button.textContent = LANG === 'zh' ? `已核对 ${checked}` : `Checked ${checked}`;
+        if(result.done) break;
+        after = result.next;
+      }
+      if(missing.length && !(await confirmDialog(LANG === 'zh' ? '清理失效记录' : 'Remove missing records',
+        LANG === 'zh' ? `发现 ${missing.length} 个存储中已不存在的文件。将清理对应的文件记录和分享链接，确定继续？` :
+          `${missing.length} files are missing from storage. Remove their records and share links?`, true))) return;
+      for(let i=0;i<missing.length;i+=10){
+        const result = await api('/api/admin/files/reconcile', {
+          method:'DELETE', body:JSON.stringify({ ids:missing.slice(i,i+10) })
+        });
+        removed += result.removed;
+        button.textContent = LANG === 'zh' ? `已清理 ${removed}` : `Removed ${removed}`;
+      }
+      toast(LANG === 'zh' ? `核对 ${checked} 个文件，清理 ${removed} 条失效记录` :
+        `Checked ${checked} files; removed ${removed} missing records`);
+      loadFiles();
+    } catch(err){ toast(err.message, 'err'); }
+    finally { button.disabled = false; button.textContent = LANG === 'zh' ? '同步存储' : 'Sync storage'; }
+  };
   $('#share-folder')?.addEventListener('click', () => openFolderShareModal(_fileDir));
   $('#new-folder').onclick = () => {
     openModal(`<h3>${LANG === 'zh' ? '新建文件夹' : 'New folder'}</h3>
@@ -2057,7 +2095,9 @@ function uploadRequest(method, path, body, state, onProgress, headers={}){
       else {
         let message = `HTTP ${xhr.status}`;
         try { message = JSON.parse(xhr.responseText).error || message; } catch {}
-        reject(new Error(message));
+        const error = new Error(message);
+        error.status = xhr.status;
+        reject(error);
       }
     };
     xhr.onerror = () => { state.xhr = null; reject(new Error('Network error')); };
@@ -2106,7 +2146,15 @@ async function uploadLargeFile(file, item, state, targetPath, preferredSessionId
       if(session.name !== file.name || session.size !== file.size || session.path !== targetPath)
         session = null;
     } catch(e) {
-      if(preferredSessionId) throw e;
+      if(preferredSessionId){
+        if(e.status === 404 || e.status === 410){
+          forgetUploadSession(sessionId);
+          if(currentTab === 'files') loadFiles().catch(() => {});
+          throw new Error(LANG === 'zh' ? '续传任务已失效，已刷新列表；请重新上传原文件' :
+            'Upload session is no longer available. Start a new upload.');
+        }
+        throw e;
+      }
       session = null;
     }
     if(!session && preferredSessionId)
@@ -2148,14 +2196,33 @@ async function uploadLargeFile(file, item, state, targetPath, preferredSessionId
         } catch(e){
           error = e;
           if(state.cancelled) return;
+          if(e.status === 404 || e.status === 410) break;
           if(attempt < 2) await new Promise(resolve => setTimeout(resolve, 1000 * (attempt + 1)));
         }
       }
-      if(error) throw error;
+      if(error){
+        if(error.status === 404 || error.status === 410){
+          forgetUploadSession(sessionId);
+          if(currentTab === 'files') loadFiles().catch(() => {});
+          throw new Error(LANG === 'zh' ? '续传任务已失效，已刷新列表；请重新上传原文件' :
+            'Upload session is no longer available. Start a new upload.');
+        }
+        throw error;
+      }
       completedBytes += chunk.size;
       uploadProgress(item, completedBytes, file.size, state);
     }
-    await api(`/api/admin/upload/multipart/${sessionId}/complete`, { method:'POST' });
+    try {
+      await api(`/api/admin/upload/multipart/${sessionId}/complete`, { method:'POST' });
+    } catch(e) {
+      if(e.status === 404 || e.status === 410){
+        forgetUploadSession(sessionId);
+        if(currentTab === 'files') loadFiles().catch(() => {});
+        throw new Error(LANG === 'zh' ? '续传任务已失效，已刷新列表；请重新上传原文件' :
+          'Upload session is no longer available. Start a new upload.');
+      }
+      throw e;
+    }
   }
   try { localStorage.removeItem(key); } catch {}
 }

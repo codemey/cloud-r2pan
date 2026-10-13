@@ -82,6 +82,15 @@ async function clearUploadSession(env: Env, id: string): Promise<void> {
   ]);
 }
 
+async function deleteFileMetadata(env: Env, id: string): Promise<void> {
+  await env.db.batch([
+    env.db.prepare("DELETE FROM shares WHERE file_id = ?1").bind(id),
+    env.db.prepare("DELETE FROM direct_links WHERE file_id = ?1").bind(id),
+    env.db.prepare("DELETE FROM download_logs WHERE file_id = ?1").bind(id),
+    env.db.prepare("DELETE FROM files WHERE id = ?1").bind(id),
+  ]);
+}
+
 /** 生成带文件名后缀的直链 URL：/d/{token}/{filename}，文件名做 URL 编码 */
 function buildDirectUrl(token: string, fileName?: string | null, downloadName?: string | null): string {
   const displayName = downloadName?.trim() || fileName?.trim();
@@ -349,6 +358,40 @@ export async function handleAdminApi(
     return json({ files: results ?? [] });
   }
 
+  if (path === "/api/admin/files/reconcile" && method === "POST") {
+    const body = await readJson<{ after?: string }>(req);
+    const after = typeof body.after === "string" ? body.after : "";
+    const { results } = await env.db.prepare(
+      "SELECT id, key FROM files WHERE id > ?1 ORDER BY id LIMIT 10"
+    ).bind(after).all<{ id: string; key: string }>();
+    const st = await storage(env);
+    const missing: string[] = [];
+    for (const file of results ?? []) {
+      if (!(await st.head(file.key))) missing.push(file.id);
+    }
+    return json({ checked: results?.length ?? 0, missing,
+      next: results?.at(-1)?.id ?? after, done: (results?.length ?? 0) < 10 });
+  }
+
+  if (path === "/api/admin/files/reconcile" && method === "DELETE") {
+    const body = await readJson<{ ids: string[] }>(req);
+    if (!Array.isArray(body.ids) || body.ids.length > 10 ||
+        body.ids.some(id => typeof id !== "string" || !/^[A-Za-z0-9]+$/.test(id))) {
+      return json({ error: msg(req, "文件 ID 无效", "Invalid file IDs") }, 400);
+    }
+    const st = await storage(env);
+    let removed = 0;
+    for (const id of body.ids) {
+      const file = await env.db.prepare("SELECT key FROM files WHERE id = ?1")
+        .bind(id).first<{ key: string }>();
+      if (file && !(await st.head(file.key))) {
+        await deleteFileMetadata(env, id);
+        removed++;
+      }
+    }
+    return json({ removed });
+  }
+
   // ── 上传文件（原始流式 body，文件名放 X-File-Name 头） ──
   if (path === "/api/admin/upload" && method === "POST") {
     const rawName = req.headers.get("x-file-name");
@@ -570,7 +613,8 @@ export async function handleAdminApi(
   if (moveFileMatch && method === "POST") {
     const body = await readJson<{ path: string }>(req);
     const targetPath = body.path;
-    if (targetPath !== "/" && (!validPath(targetPath) || !(await folderExists(env, targetPath))))
+    if (typeof targetPath !== "string" ||
+        (targetPath !== "/" && (!validPath(targetPath) || !(await folderExists(env, targetPath)))))
       return json({ error: msg(req, "目标文件夹不存在", "Target folder not found") }, 404);
     const file = await env.db.prepare("SELECT id, name, path FROM files WHERE id = ?1")
       .bind(moveFileMatch[1]).first<{ id: string; name: string; path: string }>();
@@ -592,11 +636,7 @@ export async function handleAdminApi(
     const fileId = fileMatch[1];
     const file = await env.db.prepare("SELECT key FROM files WHERE id = ?1").bind(fileId).first<{ key: string }>();
     if (!file) return json({ error: msg(req, "文件不存在", "File not found") }, 404);
-    await env.db.batch([
-      env.db.prepare("DELETE FROM shares WHERE file_id = ?1").bind(fileId),
-      env.db.prepare("DELETE FROM download_logs WHERE file_id = ?1").bind(fileId),
-      env.db.prepare("DELETE FROM files WHERE id = ?1").bind(fileId),
-    ]);
+    await deleteFileMetadata(env, fileId);
     const st = await storage(env);
     ctx.waitUntil(st.delete(file.key).catch(() => {}));
     return json({ ok: true });
