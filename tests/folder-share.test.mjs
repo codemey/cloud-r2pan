@@ -49,12 +49,20 @@ test('nested folder upload and protected share preserve paths and file streaming
     fileId = (await uploaded.json()).id;
     const files = await admin('/api/admin/files');
     assert.equal((await files.json()).files.find(file => file.id === fileId).path, `${nested}/hello.txt`);
+    const note = '下载前请先阅读说明\n安装后再运行';
+    const oversizedNote = await postJson('/api/admin/folder-shares', { path: root, note: 'x'.repeat(1001) });
+    assert.equal(oversizedNote.status, 400);
     const created = await postJson('/api/admin/folder-shares', {
-      path: root, password: 'folder-pass', max_downloads: 1,
+      path: root, password: 'folder-pass', max_downloads: 1, note,
     });
     assert.equal(created.status, 201, await created.clone().text());
     shareId = (await created.json()).id;
     const share = `${base}/f/${shareId}`;
+    const shareInfo = await fetch(`${share}/info`);
+    assert.equal(shareInfo.status, 200);
+    assert.equal((await shareInfo.json()).note, undefined);
+    const adminShares = await admin('/api/admin/folder-shares');
+    assert.equal((await adminShares.json()).shares.find(item => item.id === shareId).note, note);
     const cleanup = await admin('/api/admin/shares/cleanup', { method: 'POST' });
     assert.equal(cleanup.status, 200);
     const afterCleanup = await admin('/api/admin/files');
@@ -76,8 +84,21 @@ test('nested folder upload and protected share preserve paths and file streaming
     const manifestResponse = await fetch(`${share}/manifest?t=${encodeURIComponent(ticket)}`);
     assert.equal(manifestResponse.status, 200);
     const manifest = await manifestResponse.json();
+    assert.equal(manifest.note, note);
     assert.ok(manifest.directories.includes('nested'));
     assert.deepEqual(manifest.files.map(file => file.path), ['nested/hello.txt']);
+    const updateNote = await admin(`/api/admin/folder-shares/${shareId}`, {
+      method: 'PATCH', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ note: '更新后的备注' }),
+    });
+    assert.equal(updateNote.status, 200);
+    assert.equal((await (await fetch(`${share}/manifest?t=${encodeURIComponent(ticket)}`)).json()).note, '更新后的备注');
+    const clearNote = await admin(`/api/admin/folder-shares/${shareId}`, {
+      method: 'PATCH', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ note: '' }),
+    });
+    assert.equal(clearNote.status, 200);
+    assert.equal((await (await fetch(`${share}/manifest?t=${encodeURIComponent(ticket)}`)).json()).note, null);
 
     const fileUrl = `${share}/file/${fileId}?t=${encodeURIComponent(ticket)}`;
     const range = await fetch(fileUrl, { headers: { range: 'bytes=0-5' } });

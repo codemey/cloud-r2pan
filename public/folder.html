@@ -46,6 +46,7 @@
     .file-icon { color:#0f8776; margin-right:9px; }
     .dir-icon { color:#c88524; }
     .empty { padding:32px 10px; text-align:center; color:#64748b; }
+    .share-note { margin-top:28px; color:#c62828; font-size:22px; font-weight:700; line-height:1.5; white-space:pre-wrap; overflow-wrap:anywhere; }
     @media (max-width:600px) { .heading { display:block; } main { padding-top:22px; } .content-card { padding:16px; } .table th:nth-child(2), .table td:nth-child(2) { display:none; } }
   </style>
 </head>
@@ -59,6 +60,7 @@
       <div class="notice" id="notice" role="status"></div>
       <div id="contents"></div>
     </section>
+    <div id="share-note" class="share-note" hidden></div>
   </main>
   <script>
     const token = location.pathname.split('/')[2];
@@ -98,11 +100,14 @@
       return data;
     }
     function stateTitle(status) { return ({gone:t('gone'),expired:t('expired'),maxed:t('maxed')})[status] || t('missing'); }
-    function renderInfo() {
+    function renderHeading() {
       $('title').textContent=info.name;
       document.title=`${info.name} · ${info.site_title || t('brand')}`;
       $('subtitle').textContent=`${t('path')}: ${info.path}`;
       $('stats').textContent=info.max_downloads ? `${info.downloads} / ${info.max_downloads}` : '';
+    }
+    function renderInfo() {
+      renderHeading();
       if (info.status!=='ok' && !ticket) { $('contents').innerHTML=`<div class="empty">${esc(stateTitle(info.status))}</div>`; return; }
       if (info.oauth?.enabled && !info.oauth.authed) {
         $('toolbar').innerHTML=oauthProviders.map(provider=>{
@@ -126,19 +131,23 @@
       }
     }
     async function unlock() {
-      const button=$('view-files'); button.disabled=true;
+      const button=$('view-files');
+      if (button) button.disabled=true;
       try {
         const result=await api(`${base}/verify`, {method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({password:$('password')?.value || '',turnstile:window.folderTurnstile || ''})});
         ticket=result.ticket;
         sessionStorage.setItem(`folder-ticket:${token}`,ticket);
         await loadManifest();
       } catch(error) {
+        if (!button) renderInfo();
         notice(error.message==='bad_password'?t('badPassword'):error.message==='oauth_required'?t('oauth'):error.message==='turnstile_failed'?t('turnstile'):error.message,true);
-        button.disabled=false;
+        if (button) button.disabled=false;
       }
     }
     async function loadManifest() {
       manifest=await api(`${base}/manifest?t=${encodeURIComponent(ticket)}`);
+      $('share-note').textContent=manifest.note || '';
+      $('share-note').hidden=!manifest.note;
       const total=manifest.files.reduce((sum,file)=>sum+file.size,0);
       $('stats').textContent=`${t('count',{n:manifest.files.length})} · ${t('size',{n:fmtSize(total)})}`;
       $('toolbar').innerHTML=`<button class="primary" type="button" id="download-all" ${manifest.files.length?'':'disabled'}>${esc(t('all'))}</button>
@@ -230,8 +239,14 @@
           oauthProviders=(await api('/oauth/providers').catch(()=>({providers:[]}))).providers || [];
         }
         ticket=sessionStorage.getItem(`folder-ticket:${token}`);
-        if(ticket && (!info.oauth?.enabled || info.oauth.authed)) { try { await loadManifest(); $('title').textContent=info.name; $('subtitle').textContent=`${t('path')}: ${info.path}`; return; }
+        if(ticket && (!info.oauth?.enabled || info.oauth.authed)) { try { await loadManifest(); renderHeading(); return; }
           catch { ticket=null; sessionStorage.removeItem(`folder-ticket:${token}`); } }
+        if(info.status==='ok' && !info.needs_password && !info.turnstile?.needs_now && (!info.oauth?.enabled || info.oauth.authed)) {
+          renderHeading();
+          $('contents').innerHTML=`<div class="empty">${esc(t('loading'))}</div>`;
+          await unlock();
+          return;
+        }
         renderInfo();
       } catch { $('title').textContent=t('missing'); }
     })();

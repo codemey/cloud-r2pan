@@ -21,6 +21,7 @@ interface FolderShare {
   revoked: number;
   password_hash: string | null;
   password_cipher: string | null;
+  note: string | null;
 }
 
 export function validPath(value: unknown): string | null {
@@ -161,14 +162,16 @@ export async function handleFolderAdmin(req: Request, env: Env, path: string): P
     const hours = Number(body.expires_hours);
     const maximum = Number(body.max_downloads);
     const password = typeof body.password === "string" ? body.password.trim() : "";
+    const note = typeof body.note === "string" ? body.note.trim() : "";
+    if (note.length > 1000) return json({ error: "Note is too long" }, { status: 400 });
     const id = randomId(10);
     await env.db.prepare(
-      `INSERT INTO folder_shares(id, path, created_at, expires_at, max_downloads, password_hash, password_cipher)
-       VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)`
+      `INSERT INTO folder_shares(id, path, created_at, expires_at, max_downloads, password_hash, password_cipher, note)
+       VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)`
     ).bind(id, folderPath, Date.now(), Number.isFinite(hours) && hours > 0 ? Date.now() + hours * 3600_000 : null,
       Number.isSafeInteger(maximum) && maximum > 0 ? maximum : null,
       password ? await hashPassword(password) : null,
-      password ? await encryptSecret(password, env.admin) : null).run();
+      password ? await encryptSecret(password, env.admin) : null, note || null).run();
     return json({ ok: true, id, url: `/f/${id}` }, { status: 201 });
   }
 
@@ -177,6 +180,7 @@ export async function handleFolderAdmin(req: Request, env: Env, path: string): P
     return json({ shares: await Promise.all(results.map(async (row) => ({
       id: row.id, path: row.path, created_at: row.created_at, expires_at: row.expires_at,
       max_downloads: row.max_downloads, download_count: row.download_count, revoked: row.revoked,
+      note: row.note,
       status: folderStatus(row) === "ok" ? "active" : folderStatus(row),
       has_password: !!row.password_hash,
       password_plain: row.password_cipher ? await decryptSecret(row.password_cipher, env.admin) : null,
@@ -185,6 +189,15 @@ export async function handleFolderAdmin(req: Request, env: Env, path: string): P
   }
 
   const match = /^\/api\/admin\/folder-shares\/([A-Za-z0-9]+)$/.exec(path);
+  if (match && req.method === "PATCH") {
+    const body = await req.json().catch(() => ({})) as { note?: unknown };
+    if (typeof body.note !== "string") return json({ error: "Invalid note" }, { status: 400 });
+    const note = body.note.trim();
+    if (note.length > 1000) return json({ error: "Note is too long" }, { status: 400 });
+    const result = await env.db.prepare("UPDATE folder_shares SET note = ?1 WHERE id = ?2")
+      .bind(note || null, match[1]).run();
+    return json({ ok: (result.meta.changes ?? 0) > 0 }, { status: result.meta.changes ? 200 : 404 });
+  }
   if (match && req.method === "DELETE") {
     const result = await env.db.prepare("DELETE FROM folder_shares WHERE id = ?1").bind(match[1]).run();
     return json({ ok: (result.meta.changes ?? 0) > 0 }, { status: result.meta.changes ? 200 : 404 });
@@ -258,7 +271,7 @@ export async function handleFolderPublic(req: Request, env: Env, ctx: ExecutionC
       const parts = file.path.slice(row.path.length + 1).split("/");
       for (let i = 1; i < parts.length; i++) directoryPaths.add(parts.slice(0, i).join("/"));
     }
-    return json({ name: row.path.split("/").pop(), directories: [...directoryPaths].sort(),
+    return json({ name: row.path.split("/").pop(), note: row.note, directories: [...directoryPaths].sort(),
       files: files.map((file) => ({ id: file.id, path: file.path.slice(row.path.length + 1), size: file.size })) });
   }
 

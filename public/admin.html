@@ -474,13 +474,13 @@ body {
 /* ── 表单 ─────────────────────────────── */
 .field { margin-bottom: 14px; }
 .field label { display: block; font-size: 13px; font-weight: 600; color: var(--text-2); margin-bottom: 7px; }
-.field input, .field select {
+.field input, .field select, .field textarea {
   width: 100%; padding: 12px 14px; border-radius: 14px; font-size: 15px; font-family: inherit;
   color: var(--text); background: var(--sf-input); border: 1px solid var(--stroke-strong); outline: none;
   transition: border .2s, background .2s; -webkit-appearance: none; appearance: none;
 }
-.field input:focus { border-color: rgba(10,132,255,.7); background: var(--sf-input-focus); }
-.field input::placeholder { color: var(--text-3); }
+.field input:focus, .field textarea:focus { border-color: rgba(10,132,255,.7); background: var(--sf-input-focus); }
+.field input::placeholder, .field textarea::placeholder { color: var(--text-3); }
 .field .tip { margin-top: 6px; font-size: 12px; color: var(--text-3); line-height: 1.5; }
 
 /* ── iOS 分组设置列表 ─────────────────── */
@@ -2305,13 +2305,15 @@ function openFolderShareModal(path){
       <option value="0">${esc(t('perm'))}</option><option value="24">${esc(t('d1'))}</option><option value="168">${esc(t('d7'))}</option><option value="720">${esc(t('d30'))}</option></select></div>
     <div class="field"><label>${esc(t('sharePassword'))}</label><input type="password" id="folder-password" placeholder="${esc(t('sharePasswordPh'))}"></div>
     <div class="field"><label>${esc(t('maxDownloadsLabel'))}</label><input type="number" id="folder-max" min="0" placeholder="${esc(t('unlimitedPlaceholder'))}"></div>
+    <div class="field"><label>${LANG === 'zh' ? '分享备注（显示在分享页）' : 'Share note (shown on page)'}</label>
+      <textarea id="folder-note" rows="3" maxlength="1000" style="resize:vertical" placeholder="${LANG === 'zh' ? '输入需要告知下载者的说明' : 'Information for people downloading this folder'}"></textarea></div>
     <div class="actions"><button class="btn" data-x>${esc(t('cancel'))}</button><button class="btn primary" id="folder-share-create">${esc(t('generate'))}</button></div>`);
   $('[data-x]').onclick=closeModal;
   $('#folder-share-create').onclick=async()=>{
     try {
       const result=await api('/api/admin/folder-shares',{method:'POST',body:JSON.stringify({
         path, expires_hours:Number($('#folder-exp').value)||null, max_downloads:Number($('#folder-max').value)||null,
-        password:$('#folder-password').value.trim()||null
+        password:$('#folder-password').value.trim()||null, note:$('#folder-note').value.trim()||null
       })});
       const link=location.origin+result.url;
       openModal(`<h3>${esc(t('shareCreated'))}</h3><div class="link-box"><input readonly value="${esc(link)}" onclick="this.select()"><button class="btn primary" id="folder-copy">${esc(t('copy'))}</button></div>
@@ -2644,9 +2646,10 @@ async function loadShares(){
     <div class="glass section">
       <div class="section-title"><h2>📁 ${LANG === 'zh' ? '文件夹分享' : 'Folder shares'}（${folderShares.length}）</h2></div>
       ${folderShares.length ? `<div style="overflow-x:auto"><table class="tbl"><thead><tr><th>${LANG === 'zh' ? '文件夹' : 'Folder'}</th><th>${esc(t('colLink'))}</th><th>${esc(t('colDownloads'))}</th><th>${esc(t('colStatus'))}</th><th>${esc(t('colActions'))}</th></tr></thead><tbody>
-        ${folderShares.map(s=>`<tr><td>${esc(s.path)}</td><td><a href="${esc(s.url)}" target="_blank">${esc(s.url)}</a></td><td>${s.download_count} / ${s.max_downloads ?? '∞'}</td>
+        ${folderShares.map(s=>`<tr><td>${esc(s.path)}${s.note?`<div style="font-size:12px;color:var(--text-3);margin-top:4px;white-space:pre-wrap">${esc(s.note)}</div>`:''}</td><td><a href="${esc(s.url)}" target="_blank">${esc(s.url)}</a></td><td>${s.download_count} / ${s.max_downloads ?? '∞'}</td>
           <td><span class="tag ${esc(s.status)}"><i></i>${esc(t(STATUS_KEY[s.status]))}</span></td>
-          <td><button class="btn sm danger" data-folder-revoke="${esc(s.id)}">${esc(t('revoke'))}</button></td></tr>`).join('')}
+          <td><button class="btn sm" data-folder-note="${esc(s.id)}">${LANG === 'zh' ? '编辑备注' : 'Edit note'}</button>
+            <button class="btn sm danger" data-folder-revoke="${esc(s.id)}">${esc(t('revoke'))}</button></td></tr>`).join('')}
       </tbody></table></div>` : `<div class="empty">${LANG === 'zh' ? '暂无文件夹分享' : 'No folder shares'}</div>`}
     </div>`;
   $('#cleanup-shares').onclick = async () => {
@@ -2665,6 +2668,21 @@ async function loadShares(){
     if(!(await confirmDialog(t('confirmRevokeT'),t('confirmRevokeD'))))return;
     await api(`/api/admin/folder-shares/${b.dataset.folderRevoke}`,{method:'DELETE'});
     toast(t('shareRevoked')); loadShares();
+  });
+  $$('[data-folder-note]').forEach(b=>b.onclick=()=>{
+    const share=folderShares.find(s=>s.id===b.dataset.folderNote);
+    if(!share)return;
+    openModal(`<h3>${LANG === 'zh' ? '编辑分享备注' : 'Edit share note'}</h3><div class="sub">${esc(share.path)}</div>
+      <div class="field"><label>${LANG === 'zh' ? '分享备注（显示在分享页）' : 'Share note (shown on page)'}</label>
+        <textarea id="folder-note-edit" rows="4" maxlength="1000" style="resize:vertical" placeholder="${LANG === 'zh' ? '输入需要告知下载者的说明' : 'Information for people downloading this folder'}">${esc(share.note || '')}</textarea></div>
+      <div class="actions"><button class="btn" data-x>${esc(t('cancel'))}</button><button class="btn primary" id="folder-note-save">${LANG === 'zh' ? '保存' : 'Save'}</button></div>`);
+    $('[data-x]').onclick=closeModal;
+    $('#folder-note-save').onclick=async()=>{
+      try{
+        await api(`/api/admin/folder-shares/${share.id}`,{method:'PATCH',body:JSON.stringify({note:$('#folder-note-edit').value})});
+        closeModal(); await loadShares();
+      }catch(e){toast(e.message,'err');}
+    };
   });
   // 密码显示/隐藏
   $$('[data-pw]').forEach(b => {

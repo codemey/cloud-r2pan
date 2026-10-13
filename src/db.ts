@@ -67,7 +67,8 @@ const SCHEMA_STATEMENTS: string[] = [
     download_count INTEGER NOT NULL DEFAULT 0,
     revoked INTEGER NOT NULL DEFAULT 0,
     password_hash TEXT,
-    password_cipher TEXT
+    password_cipher TEXT,
+    note TEXT
   )`,
   `CREATE INDEX IF NOT EXISTS idx_folder_shares_path ON folder_shares(path)`,
   `CREATE TABLE IF NOT EXISTS direct_links (
@@ -237,6 +238,7 @@ const MIGRATION_STATEMENTS: string[] = [
   "ALTER TABLE files ADD COLUMN path TEXT NOT NULL DEFAULT '/'",
   "CREATE INDEX IF NOT EXISTS idx_files_path ON files(path)",
   "ALTER TABLE upload_sessions ADD COLUMN path TEXT NOT NULL DEFAULT '/'",
+  "ALTER TABLE folder_shares ADD COLUMN note TEXT",
 ];
 
 /**
@@ -352,6 +354,7 @@ const EXPECTED_COLUMNS: { table: string; column: string }[] = [
   { table: "download_logs", column: "activation_code" },
   { table: "files", column: "path" },
   { table: "upload_sessions", column: "path" },
+  { table: "folder_shares", column: "note" },
 ];
 
 /** 预期的索引（同样是可能缺失的） */
