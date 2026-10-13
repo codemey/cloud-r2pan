@@ -657,10 +657,10 @@ const I18N = {
     colExpires: '有效期', colStatus: '状态', colReason: '原因', colBannedAt: '封禁时间', colUntil: '到期',
     // 文件
     dropTitle: '拖拽文件到此处，或点击上传',
-    dropDesc: '单文件最大 100 MB（Workers 请求限制）· 直传 R2 对象存储',
+    dropDesc: 'R2 大文件自动分段上传 · 单段 32–90 MiB',
     allFiles: '全部文件', noFiles: '还没有文件，上传一个试试', createShare: '创建分享', createDirect: '创建直链', del: '删除',
-    tooLarge: '「{name}」超过 100 MB 限制', uploadOk: '「{name}」上传成功', uploadFail: '「{name}」上传失败',
-    uploadDone: '完成 ✅', uploadFailShort: '失败',
+    tooLarge: '「{name}」超过当前分段上传上限', uploadOk: '「{name}」上传成功', uploadFail: '「{name}」上传失败',
+    uploadDone: '完成 ✅', uploadFailShort: '失败', uploadCancelled: '已取消', cancelUpload: '取消上传',
     // 分享弹窗
     shareModalTitle: '创建分享链接', shareModalSub: '生成公开下载链接，可设置有效期与下载次数上限',
     validity: '有效期', perm: '永久有效', h1: '1 小时', d1: '1 天', d7: '7 天', d30: '30 天',
@@ -1017,10 +1017,10 @@ const I18N = {
     colExpires: 'Expires', colStatus: 'Status', colReason: 'Reason', colBannedAt: 'Banned at', colUntil: 'Until',
     // 文件
     dropTitle: 'Drop files here or click to upload',
-    dropDesc: 'Max 100 MB per file (Workers limit) · Stored directly in R2',
+    dropDesc: 'Large R2 files upload in 32–90 MiB parts',
     allFiles: 'All Files', noFiles: 'No files yet — upload one to get started', createShare: 'Share', createDirect: 'Direct', del: 'Delete',
-    tooLarge: '"{name}" exceeds the 100 MB limit', uploadOk: '"{name}" uploaded', uploadFail: '"{name}" upload failed',
-    uploadDone: 'Done ✅', uploadFailShort: 'Failed',
+    tooLarge: '"{name}" exceeds the multipart upload limit', uploadOk: '"{name}" uploaded', uploadFail: '"{name}" upload failed',
+    uploadDone: 'Done ✅', uploadFailShort: 'Failed', uploadCancelled: 'Cancelled', cancelUpload: 'Cancel upload',
     // 分享弹窗
     shareModalTitle: 'Create Share Link', shareModalSub: 'Generate a public download link with optional expiry and download cap',
     validity: 'Validity', perm: 'Forever', h1: '1 hour', d1: '1 day', d7: '7 days', d30: '30 days',
@@ -1879,29 +1879,151 @@ async function loadFiles(){
   });
 }
 
+const DIRECT_UPLOAD_MAX = 90 * 1024 * 1024;
+const MULTIPART_UPLOAD_MAX = DIRECT_UPLOAD_MAX * 10000;
+
+function uploadRequest(method, path, body, state, onProgress, headers={}){
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    state.xhr = xhr;
+    xhr.open(method, path);
+    for(const [key, value] of Object.entries(headers)) xhr.setRequestHeader(key, value);
+    xhr.upload.onprogress = e => { if(e.lengthComputable) onProgress(e.loaded); };
+    xhr.onload = () => {
+      state.xhr = null;
+      if(xhr.status >= 200 && xhr.status < 300) resolve(xhr);
+      else {
+        let message = `HTTP ${xhr.status}`;
+        try { message = JSON.parse(xhr.responseText).error || message; } catch {}
+        reject(new Error(message));
+      }
+    };
+    xhr.onerror = () => { state.xhr = null; reject(new Error('Network error')); };
+    xhr.onabort = () => { state.xhr = null; reject(new Error('Cancelled')); };
+    xhr.send(body);
+  });
+}
+
+function uploadProgress(item, loaded, total){
+  const pct = Math.min(99, Math.round(loaded / total * 100));
+  item.querySelector('.prog i').style.width = pct + '%';
+  item.querySelector('.pct').textContent = pct + '%';
+}
+
+async function uploadLargeFile(file, item, state){
+  const key = 'r2pan:upload:' + JSON.stringify([file.name, file.size, file.lastModified]);
+  let sessionId = null;
+  try { sessionId = localStorage.getItem(key); } catch {}
+  let session = null;
+  if(sessionId){
+    try {
+      session = await api(`/api/admin/upload/multipart/${sessionId}`);
+      if(session.size !== file.size) session = null;
+    } catch { session = null; }
+  }
+  if(!session){
+    session = await api('/api/admin/upload/multipart', {
+      method:'POST', body:JSON.stringify({ name:file.name, size:file.size, mime:file.type || 'application/octet-stream' })
+    });
+    sessionId = session.sessionId;
+    try { localStorage.setItem(key, sessionId); } catch {}
+  }
+  state.sessionId = sessionId;
+  state.storageKey = key;
+  if(state.cancelled){ await cancelMultipartUpload(state); return; }
+  if(!session.fileId){
+    const done = new Set(session.uploadedParts || []);
+    const partSize = session.partSize;
+    const partLength = n => Math.min(partSize, file.size - (n - 1) * partSize);
+    let completedBytes = [...done].reduce((sum, n) => sum + partLength(n), 0);
+    uploadProgress(item, completedBytes, file.size);
+    for(let n = 1; n <= session.partCount; n++){
+      if(state.cancelled) return;
+      if(done.has(n)) continue;
+      const start = (n - 1) * partSize;
+      const chunk = file.slice(start, start + partLength(n));
+      let error;
+      for(let attempt = 0; attempt < 3; attempt++){
+        if(state.cancelled) return;
+        try {
+          await uploadRequest('PUT', `/api/admin/upload/multipart/${sessionId}/parts/${n}`,
+            chunk, state, loaded => uploadProgress(item, completedBytes + loaded, file.size),
+            { 'Content-Type':'application/octet-stream' });
+          error = null;
+          break;
+        } catch(e){
+          error = e;
+          if(state.cancelled) return;
+          if(attempt < 2) await new Promise(resolve => setTimeout(resolve, 1000 * (attempt + 1)));
+        }
+      }
+      if(error) throw error;
+      completedBytes += chunk.size;
+      uploadProgress(item, completedBytes, file.size);
+    }
+    await api(`/api/admin/upload/multipart/${sessionId}/complete`, { method:'POST' });
+  }
+  try { localStorage.removeItem(key); } catch {}
+}
+
+async function cancelMultipartUpload(state){
+  if(!state.sessionId || state.abortRequested) return;
+  state.abortRequested = true;
+  try {
+    await api(`/api/admin/upload/multipart/${state.sessionId}`, { method:'DELETE' });
+    if(state.storageKey) localStorage.removeItem(state.storageKey);
+  } catch(e){
+    state.abortRequested = false;
+    toast(e.message, 'err');
+  }
+}
+
+let activeUploadCount = 0;
+let refreshFilesAfterUpload = false;
 function uploadFiles(files){
   for(const file of files){
-    if(file.size > 100 * 1024 * 1024){ toast(t('tooLarge', {name: file.name}), 'err'); continue; }
+    if(file.size > MULTIPART_UPLOAD_MAX){ toast(t('tooLarge', {name:file.name}), 'err'); continue; }
     const item = document.createElement('div');
     item.className = 'upload-item glass';
     item.innerHTML = `${ficon(file.name)}<span style="min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(file.name)}</span>
-      <div class="prog"><i></i></div><span class="pct">0%</span>`;
+      <div class="prog"><i></i></div><span class="pct">0%</span>
+      <button class="btn sm" type="button" title="${esc(t('cancelUpload'))}" aria-label="${esc(t('cancelUpload'))}">×</button>`;
     $('#upload-list').prepend(item);
-    const xhr = new XMLHttpRequest();
-    xhr.open('POST', '/api/admin/upload');
-    xhr.setRequestHeader('X-File-Name', encodeURIComponent(file.name));
-    xhr.setRequestHeader('Content-Type', file.type || 'application/octet-stream');
-    xhr.upload.onprogress = e => {
-      const pct = Math.round(e.loaded / e.total * 100);
-      item.querySelector('.prog i').style.width = pct + '%';
-      item.querySelector('.pct').textContent = pct + '%';
+    const state = { cancelled:false, xhr:null, sessionId:null, storageKey:null, abortRequested:false };
+    activeUploadCount++;
+    const cancel = item.querySelector('button');
+    cancel.onclick = async () => {
+      state.cancelled = true;
+      state.xhr?.abort();
+      await cancelMultipartUpload(state);
+      item.querySelector('.pct').textContent = t('uploadCancelled');
+      cancel.remove();
     };
-    xhr.onload = () => {
-      if(xhr.status === 201){ item.querySelector('.pct').textContent = t('uploadDone'); toast(t('uploadOk', {name: file.name})); loadFiles(); }
-      else { item.querySelector('.pct').textContent = t('uploadFailShort'); toast(t('uploadFail', {name: file.name}), 'err'); }
-    };
-    xhr.onerror = () => { item.querySelector('.pct').textContent = t('uploadFailShort'); toast(t('uploadFail', {name: file.name}), 'err'); };
-    xhr.send(file);
+    const promise = file.size > DIRECT_UPLOAD_MAX
+      ? uploadLargeFile(file, item, state)
+      : uploadRequest('POST', '/api/admin/upload', file, state,
+          loaded => uploadProgress(item, loaded, file.size),
+          { 'X-File-Name':encodeURIComponent(file.name),
+            'Content-Type':file.type || 'application/octet-stream' });
+    promise.then(() => {
+      if(state.cancelled) return;
+      item.querySelector('.prog i').style.width = '100%';
+      item.querySelector('.pct').textContent = t('uploadDone');
+      cancel.remove();
+      toast(t('uploadOk', {name:file.name}));
+      refreshFilesAfterUpload = true;
+    }).catch(e => {
+      if(state.cancelled) return;
+      item.querySelector('.pct').textContent = t('uploadFailShort');
+      cancel.remove();
+      toast(`${t('uploadFail', {name:file.name})}: ${e.message}`, 'err');
+    }).finally(() => {
+      activeUploadCount--;
+      if(activeUploadCount === 0 && refreshFilesAfterUpload){
+        refreshFilesAfterUpload = false;
+        loadFiles();
+      }
+    });
   }
 }
 

@@ -120,8 +120,15 @@ function parseRange(header: string | null, size: number): { offset: number; leng
     const end = m[2] === "" ? size - 1 : Math.min(Number(m[2]), size - 1);
     length = end - offset + 1;
   }
-  if (offset >= size || length <= 0) return null;
+  if (!Number.isSafeInteger(offset) || !Number.isSafeInteger(length) || offset >= size || length <= 0) return null;
   return { offset, length };
+}
+
+function fixedLengthBody(body: ReadableStream<Uint8Array>, length: number): ReadableStream<Uint8Array> | null {
+  if (length === 0) return null;
+  const { readable, writable } = new FixedLengthStream(length);
+  body.pipeTo(writable).catch(() => {});
+  return readable;
 }
 
 /* ═══════════ 分享密码 & 下载授权令牌 ═══════════
@@ -352,7 +359,7 @@ export async function handleDownload(
   if (row.max_downloads && row.download_count >= row.max_downloads) return errorPage(req, 410, { zh: "下载次数已达上限", en: "Download Limit Reached" },
     { zh: `该资源允许下载 ${row.max_downloads} 次，名额已用完。`, en: `Download limit (${row.max_downloads}) reached.` });
 
-  if (row.max_downloads) {
+  if (row.max_downloads && req.method !== "HEAD") {
     const r = await env.db.prepare(
       `UPDATE shares SET download_count = download_count + 1 WHERE id = ?1 AND download_count < ?2`
     ).bind(token, row.max_downloads).run();
@@ -490,7 +497,7 @@ export async function handleDirectDownload(
   if (row.max_downloads && row.download_count >= row.max_downloads) return errorPage(req, 410, { zh: "下载次数已达上限", en: "Download Limit Reached" },
     { zh: `名额已用完。`, en: `Quota used up.` });
 
-  if (row.max_downloads) {
+  if (row.max_downloads && req.method !== "HEAD") {
     const r = await env.db.prepare(
       `UPDATE direct_links SET download_count = download_count + 1 WHERE id = ?1 AND download_count < ?2`
     ).bind(token, row.max_downloads).run();
@@ -567,34 +574,42 @@ async function streamFile(
   const activationCode = (urlCode || headerCode || "").trim().toUpperCase() || null;
   const codeRow = activationCode ? await findCodeByString(env, activationCode) : null;
 
-  const range = parseRange(req.headers.get("range"), row.size);
-  let obj;
+  const rangeHeader = req.headers.get("range");
+  const range = parseRange(rangeHeader, row.size);
+  if (rangeHeader && !range) {
+    return new Response(null, { status: 416, headers: { "content-range": `bytes */${row.size}`, "accept-ranges": "bytes" } });
+  }
+  let obj: Awaited<ReturnType<StorageProvider["get"]>> = null;
+  let head: Awaited<ReturnType<StorageProvider["head"]>> = null;
   try {
     const st = await storage(env);
-    obj = await st.get(row.key, range ? { offset: range.offset, length: range.length } : undefined);
+    if (req.method === "HEAD") head = await st.head(row.key);
+    else obj = await st.get(row.key, range ? { offset: range.offset, length: range.length } : undefined);
   } catch (err: any) {
     console.error("[download] storage error:", err);
     return errorPage(req, 502, { zh: "存储服务错误", en: "Storage Error" },
       { zh: "无法从存储后端读取文件。", en: "Cannot read file from storage." });
   }
-  if (!obj)
+  if (!obj && !head)
     return errorPage(req, 404, { zh: "文件不存在", en: "File Not Found" },
       { zh: "文件可能已被删除。", en: "File may have been deleted." });
 
   const headers = new Headers();
-  headers.set("content-type", obj.contentType);
-  headers.set("etag", obj.etag);
+  headers.set("content-type", obj?.contentType || head?.contentType || row.mime);
+  if (obj?.etag) headers.set("etag", obj.etag);
   headers.set("accept-ranges", "bytes");
   headers.set("cache-control", "no-store");
   const displayName = row.download_name || row.name;
   headers.set("content-disposition", `attachment; filename*=UTF-8''${encodeURIComponent(displayName)}`);
   const { addSecurityHeaders } = await import("./pages");
   addSecurityHeaders(headers, { isDownload: true });
-  const servedLen = range ? range.length : obj.size;
+  const servedLen = range ? range.length : row.size;
   headers.set("content-length", String(servedLen));
   if (range) {
     headers.set("content-range", `bytes ${range.offset}-${range.offset + servedLen - 1}/${row.size}`);
   }
+
+  if (req.method === "HEAD") return new Response(null, { status: range ? 206 : 200, headers });
 
   // 后台记录
   const bytes = servedLen;
@@ -636,5 +651,5 @@ async function streamFile(
     })()
   );
 
-  return new Response(obj.body, { status: range ? 206 : 200, headers });
+  return new Response(fixedLengthBody(obj!.body, servedLen), { status: range ? 206 : 200, headers });
 }

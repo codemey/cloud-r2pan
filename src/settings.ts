@@ -317,22 +317,19 @@ export async function addTraffic(env: Env, bytes: number): Promise<void> {
   const day = now.toISOString().slice(0, 10);
 
   await env.db.batch([
-    // ① 同步 traffic_month 到当月（幂等：同月时 value 不变）
+    // ① 先按旧的 traffic_month 决定累加或跨月重置，再更新月份。
+    env.db.prepare(
+      `INSERT INTO settings(key, value) VALUES('traffic_used_bytes', ?1)
+       ON CONFLICT(key) DO UPDATE SET value = CAST(
+         CASE WHEN (SELECT value FROM settings WHERE key = 'traffic_month') = ?2
+           THEN CAST(settings.value AS INTEGER) + CAST(excluded.value AS INTEGER)
+           ELSE CAST(excluded.value AS INTEGER)
+         END AS TEXT)`
+    ).bind(String(bytes), month),
+
     env.db.prepare(
       "INSERT INTO settings(key, value) VALUES('traffic_month', ?1) ON CONFLICT(key) DO UPDATE SET value = excluded.value"
     ).bind(month),
-
-    // ② 更新 traffic_used_bytes —— 跨月逻辑完全内联在 SQL 里
-    //    同月：累加旧值；跨月：从 0 开始加
-    env.db.prepare(
-      `UPDATE settings SET value = CAST(
-        CASE
-          WHEN (SELECT value FROM settings WHERE key = 'traffic_month') = ?1
-          THEN COALESCE((SELECT value FROM settings WHERE key = 'traffic_used_bytes'), '0')
-          ELSE '0'
-        END AS INTEGER) + ?2 AS TEXT)
-       WHERE key = 'traffic_used_bytes'`
-    ).bind(month, String(bytes)),
 
     // ③ traffic_stats 每日汇总（原本就是原子累加，保持不变）
     env.db.prepare(

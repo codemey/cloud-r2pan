@@ -11,7 +11,7 @@
 | 计算 | **Cloudflare Workers** | 边缘计算，毫秒级冷启动，自带全球 CDN，零服务器运维 |
 | 对象存储 | **Cloudflare R2** | 与 Worker 同生态，API 兼容 S3，无出站流量费 |
 | 数据库 | **Cloudflare D1** | Serverless SQLite，支持 SQL 原子更新（用于下载计数扣减），自带索引优化 |
-| 前端 | **原生 HTML + CSS + JavaScript** | 单文件无构建，`fetch` + `FormData` + 动态模板，零运行时开销 |
+| 前端 | **原生 HTML + CSS + JavaScript** | 单文件无构建，`fetch` / `XMLHttpRequest` 上传 + 动态模板，零运行时开销 |
 | 加密 | **Web Crypto API** | Worker 运行时原生支持（SHA-256、HMAC-SHA256、AES-GCM、HKDF），无第三方依赖 |
 | 人机验证 | **Cloudflare Turnstile** | 与 Workers 同生态，零配置，前端 widget + 后端 siteverify 双重校验 |
 | 2FA | **TOTP (RFC 6238)** | Google Authenticator 标准，Worker 原生 `crypto.subtle` 实现 HMAC-SHA1 |
@@ -63,11 +63,13 @@ GET  /s/:token/download    → 下载主流程（封禁 → 密码 → Turnstile
 
 ## 数据库 Schema（D1）
 
-共 **7 张表**，首次请求时由 `ensureSchema` 自动创建，旧库有幂等 `ALTER TABLE` 迁移：
+核心表在首次请求时由 `ensureSchema` 自动创建，旧库有幂等 `ALTER TABLE` 迁移：
 
 | 表 | 主键 | 核心字段 | 用途 |
 |---|---|---|---|
 | `files` | `id` | `key`, `name`, `size`, `mime` | R2 对象的元数据索引 |
+| `upload_sessions` | `id` | `r2_upload_id`, `key`, `size`, `part_size`, `expires_at` | 大文件上传会话，完成前不出现在文件列表 |
+| `upload_parts` | `(session_id, part_number)` | `etag` | 分段回执，用于中断后继续上传 |
 | `shares` | `id` | `file_id`, `expires_at`, `max_downloads`, `download_count`, `revoked`, `password_hash`, `password_cipher` | 分享链接。`password_cipher` 存可逆加密后的密码明文（AES-GCM），用于管理员事后查看 |
 | `download_logs` | `id` | `share_id`, `file_id`, `ip`, `browser`, `os`, `country`, `bytes`, `created_at` | 每次下载一行，用于"单 IP 重复下载检测"和流量统计 |
 | `login_logs` | `id` | `action`, `ip`, `browser`, `os`, `country`, `result`, `reason`, `created_at` | 管理员登录审计（成功 / 失败 / 限流 / 登出 / 恢复码） |
@@ -150,7 +152,7 @@ handleDownload 执行顺序：
 | Tab | 功能 |
 |---|---|
 | 概览 | 流量图表（每日 / 每周）、下载 / 分享 / 文件计数、最近活动 |
-| 文件 | 上传（FormData 直传 Worker → R2）、删除（级联删 shares） |
+| 文件 | 小文件直传；大文件按 32–90 MiB 分段上传，R2 完成后保存为单个对象；删除时级联删 shares |
 | 分享 | 列表（文件大小、有效期、密码明文显示、下载状态徽章）、创建、撤销 |
 | 日志 | 下载记录（IP / 浏览器 / OS / 国家 / 流量）、分页、搜索 |
 | 封禁 | 封禁列表 + 解封 |

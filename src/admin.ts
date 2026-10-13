@@ -50,6 +50,36 @@ function sanitizeName(name: string): string {
   return cleaned || "unnamed";
 }
 
+const UPLOAD_PART_MIN = 32 * 1024 * 1024;
+const UPLOAD_PART_MAX = 90 * 1024 * 1024;
+const UPLOAD_MAX_PARTS = 10_000;
+const UPLOAD_SESSION_MS = 24 * 3600_000;
+
+interface UploadSession {
+  id: string;
+  r2_upload_id: string;
+  key: string;
+  name: string;
+  size: number;
+  mime: string;
+  part_size: number;
+  part_count: number;
+  expires_at: number;
+  completed_file_id: string | null;
+}
+
+async function uploadSession(env: Env, id: string): Promise<UploadSession | null> {
+  return env.db.prepare("SELECT * FROM upload_sessions WHERE id = ?1")
+    .bind(id).first<UploadSession>();
+}
+
+async function clearUploadSession(env: Env, id: string): Promise<void> {
+  await env.db.batch([
+    env.db.prepare("DELETE FROM upload_parts WHERE session_id = ?1").bind(id),
+    env.db.prepare("DELETE FROM upload_sessions WHERE id = ?1").bind(id),
+  ]);
+}
+
 /** 生成带文件名后缀的直链 URL：/d/{token}/{filename}，文件名做 URL 编码 */
 function buildDirectUrl(token: string, fileName?: string | null, downloadName?: string | null): string {
   const displayName = downloadName?.trim() || fileName?.trim();
@@ -352,6 +382,155 @@ export async function handleAdminApi(
       return json({ error: msg(req, "数据库写入失败，请重试", "Database write failed. Please retry.") }, 500);
     }
     return json({ ok: true, id, name, size: resultSize }, 201);
+  }
+
+  // 大文件只在 R2 binding 上使用原生 multipart；每个请求仅传一个分段。
+  if (path === "/api/admin/upload/multipart" && method === "POST") {
+    const st = await storage(env);
+    if (st.kind !== "r2" || !env.r2) {
+      return json({ error: msg(req, "大文件分段上传需要 R2 存储后端", "Large multipart uploads require R2 storage") }, 400);
+    }
+    const body = await readJson<{ name: string; size: number; mime: string }>(req);
+    const size = Number(body.size);
+    if (typeof body.name !== "string" || !Number.isSafeInteger(size) || size <= UPLOAD_PART_MAX) {
+      return json({ error: msg(req, "文件信息无效", "Invalid file metadata") }, 400);
+    }
+    const partSize = Math.min(UPLOAD_PART_MAX, Math.max(UPLOAD_PART_MIN, Math.ceil(size / UPLOAD_MAX_PARTS)));
+    const partCount = Math.ceil(size / partSize);
+    if (partCount > UPLOAD_MAX_PARTS) {
+      return json({ error: msg(req, "文件超过分段上传上限", "File exceeds multipart upload limit") }, 413);
+    }
+
+    const expired = await env.db.prepare(
+      "SELECT id, r2_upload_id, key, completed_file_id FROM upload_sessions WHERE expires_at < ?1 LIMIT 10"
+    ).bind(Date.now()).all<Pick<UploadSession, "id" | "r2_upload_id" | "key" | "completed_file_id">>();
+    for (const old of expired.results ?? []) {
+      try {
+        if (!old.completed_file_id) {
+          const file = await env.db.prepare("SELECT id FROM files WHERE id = ?1").bind(old.id).first();
+          if (!file) {
+            const object = await env.r2.head(old.key);
+            if (object) await env.r2.delete(old.key);
+            else await env.r2.resumeMultipartUpload(old.key, old.r2_upload_id).abort();
+          }
+        }
+        await clearUploadSession(env, old.id);
+      } catch { /* Leave it for the next cleanup attempt. */ }
+    }
+
+    const id = randomId(18);
+    const key = `files/${id}`;
+    const name = sanitizeName(body.name);
+    const mime = typeof body.mime === "string" && body.mime.trim()
+      ? body.mime.trim().slice(0, 128) : "application/octet-stream";
+    const upload = await env.r2.createMultipartUpload(key, {
+      httpMetadata: {
+        contentType: mime,
+        contentDisposition: `attachment; filename*=UTF-8''${encodeURIComponent(name)}`,
+      },
+    });
+    const now = Date.now();
+    try {
+      await env.db.prepare(
+        `INSERT INTO upload_sessions(id, r2_upload_id, key, name, size, mime, part_size, part_count, created_at, expires_at)
+         VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)`
+      ).bind(id, upload.uploadId, key, name, size, mime, partSize, partCount, now, now + UPLOAD_SESSION_MS).run();
+    } catch (error) {
+      await upload.abort().catch(() => {});
+      throw error;
+    }
+    return json({ ok: true, sessionId: id, partSize, partCount }, 201);
+  }
+
+  const uploadMatch = /^\/api\/admin\/upload\/multipart\/([A-Za-z0-9]+)$/.exec(path);
+  if (uploadMatch && (method === "GET" || method === "DELETE")) {
+    const session = await uploadSession(env, uploadMatch[1]);
+    if (!session) return json({ error: msg(req, "上传任务不存在", "Upload session not found") }, 404);
+    if (method === "GET") {
+      if (!session.completed_file_id && session.expires_at < Date.now()) {
+        return json({ error: msg(req, "上传任务已过期", "Upload session expired") }, 410);
+      }
+      const parts = session.completed_file_id ? [] : (await env.db.prepare(
+        "SELECT part_number FROM upload_parts WHERE session_id = ?1 ORDER BY part_number"
+      ).bind(session.id).all<{ part_number: number }>()).results ?? [];
+      return json({ ok: true, name: session.name, size: session.size,
+        partSize: session.part_size, partCount: session.part_count,
+        uploadedParts: parts.map((p) => p.part_number), fileId: session.completed_file_id });
+    }
+    if (session.completed_file_id) return json({ error: msg(req, "文件已经上传完成", "Upload already completed") }, 409);
+    if (!env.r2) return json({ error: "R2 binding missing" }, 500);
+    const object = await env.r2.head(session.key);
+    if (object) await env.r2.delete(session.key);
+    else await env.r2.resumeMultipartUpload(session.key, session.r2_upload_id).abort();
+    await clearUploadSession(env, session.id);
+    return json({ ok: true });
+  }
+
+  const uploadPartMatch = /^\/api\/admin\/upload\/multipart\/([A-Za-z0-9]+)\/parts\/([1-9][0-9]*)$/.exec(path);
+  if (uploadPartMatch && method === "PUT") {
+    const session = await uploadSession(env, uploadPartMatch[1]);
+    if (!session) return json({ error: msg(req, "上传任务不存在", "Upload session not found") }, 404);
+    if (session.expires_at < Date.now() || session.completed_file_id) {
+      return json({ error: msg(req, "上传任务已结束", "Upload session is closed") }, 410);
+    }
+    const partNumber = Number(uploadPartMatch[2]);
+    if (!Number.isSafeInteger(partNumber) || partNumber > session.part_count || !req.body) {
+      return json({ error: msg(req, "分段编号无效", "Invalid part number") }, 400);
+    }
+    const expectedSize = Math.min(session.part_size, session.size - (partNumber - 1) * session.part_size);
+    const declaredSize = req.headers.get("content-length");
+    if (declaredSize !== null && Number(declaredSize) !== expectedSize) {
+      return json({ error: msg(req, "分段大小不符", "Part size mismatch") }, 400);
+    }
+    if (!env.r2) return json({ error: "R2 binding missing" }, 500);
+    const upload = env.r2.resumeMultipartUpload(session.key, session.r2_upload_id);
+    const part = await upload.uploadPart(partNumber, req.body);
+    await env.db.prepare(
+      `INSERT INTO upload_parts(session_id, part_number, etag) VALUES(?1, ?2, ?3)
+       ON CONFLICT(session_id, part_number) DO UPDATE SET etag = excluded.etag`
+    ).bind(session.id, partNumber, part.etag).run();
+    return json({ ok: true, partNumber });
+  }
+
+  const uploadCompleteMatch = /^\/api\/admin\/upload\/multipart\/([A-Za-z0-9]+)\/complete$/.exec(path);
+  if (uploadCompleteMatch && method === "POST") {
+    const session = await uploadSession(env, uploadCompleteMatch[1]);
+    if (!session) return json({ error: msg(req, "上传任务不存在", "Upload session not found") }, 404);
+    if (session.completed_file_id) return json({ ok: true, id: session.completed_file_id, size: session.size });
+    if (session.expires_at < Date.now()) {
+      return json({ error: msg(req, "上传任务已过期", "Upload session expired") }, 410);
+    }
+    if (!env.r2) return json({ error: "R2 binding missing" }, 500);
+    const { results } = await env.db.prepare(
+      "SELECT part_number, etag FROM upload_parts WHERE session_id = ?1 ORDER BY part_number"
+    ).bind(session.id).all<{ part_number: number; etag: string }>();
+    const parts = results ?? [];
+    if (parts.length !== session.part_count || parts.some((p, i) => p.part_number !== i + 1)) {
+      return json({ error: msg(req, "仍有分段未上传", "Some parts are missing") }, 409);
+    }
+    let object = await env.r2.head(session.key);
+    if (!object) {
+      object = await env.r2.resumeMultipartUpload(session.key, session.r2_upload_id)
+        .complete(parts.map((p) => ({ partNumber: p.part_number, etag: p.etag })));
+    }
+    if (object.size !== session.size) {
+      await env.r2.delete(session.key);
+      await clearUploadSession(env, session.id);
+      return json({ error: msg(req, "合并后的文件大小不符，请重新上传", "Completed file size mismatch; upload again") }, 409);
+    }
+    await env.db.prepare(
+      `INSERT INTO files(id, key, name, size, mime, uploaded_at) VALUES(?1, ?2, ?3, ?4, ?5, ?6)
+       ON CONFLICT(id) DO NOTHING`
+    ).bind(session.id, session.key, session.name, session.size, session.mime, Date.now()).run();
+    const file = await env.db.prepare("SELECT key, size FROM files WHERE id = ?1")
+      .bind(session.id).first<{ key: string; size: number }>();
+    if (file?.key !== session.key || file.size !== session.size) {
+      return json({ error: msg(req, "文件登记失败", "File registration failed") }, 500);
+    }
+    await env.db.prepare("UPDATE upload_sessions SET completed_file_id = ?1 WHERE id = ?1")
+      .bind(session.id).run();
+    await env.db.prepare("DELETE FROM upload_parts WHERE session_id = ?1").bind(session.id).run();
+    return json({ ok: true, id: session.id, name: session.name, size: session.size }, 201);
   }
 
   // ── 删除文件（连带存储对象、分享、日志） ──────────
@@ -1694,7 +1873,7 @@ export async function handleAdminApi(
         const prov = createS3Provider(cfg);
         const testKey = `_r2pan-test-${Date.now()}`;
         // 写一个测试对象
-        await prov.put(testKey, new TextEncoder().encode("cloud-r2pan storage test").buffer, {
+        await prov.put(testKey, new TextEncoder().encode("cloud-r2pan storage test"), {
           contentType: "text/plain",
         });
         // 读回验证

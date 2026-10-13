@@ -21,6 +21,25 @@ const SCHEMA_STATEMENTS: string[] = [
     mime TEXT NOT NULL DEFAULT 'application/octet-stream',
     uploaded_at INTEGER NOT NULL
   )`,
+  `CREATE TABLE IF NOT EXISTS upload_sessions (
+    id TEXT PRIMARY KEY,
+    r2_upload_id TEXT NOT NULL,
+    key TEXT NOT NULL UNIQUE,
+    name TEXT NOT NULL,
+    size INTEGER NOT NULL,
+    mime TEXT NOT NULL,
+    part_size INTEGER NOT NULL,
+    part_count INTEGER NOT NULL,
+    created_at INTEGER NOT NULL,
+    expires_at INTEGER NOT NULL,
+    completed_file_id TEXT
+  )`,
+  `CREATE TABLE IF NOT EXISTS upload_parts (
+    session_id TEXT NOT NULL,
+    part_number INTEGER NOT NULL,
+    etag TEXT NOT NULL,
+    PRIMARY KEY(session_id, part_number)
+  )`,
   `CREATE TABLE IF NOT EXISTS shares (
     id TEXT PRIMARY KEY,
     file_id TEXT NOT NULL,
@@ -164,7 +183,7 @@ const SCHEMA_STATEMENTS: string[] = [
 
 /** 所有预期的业务表 —— 自动建表 & 升级时都要检查 */
 export const EXPECTED_TABLES = [
-  "files", "shares", "direct_links", "download_logs", "login_logs",
+  "files", "upload_sessions", "upload_parts", "shares", "direct_links", "download_logs", "login_logs",
   "turnstile_visits", "banned_ips", "settings", "traffic_stats",
   "oauth_states", "oauth_providers", "activation_plans", "activation_codes",
   "directories",
