@@ -5,6 +5,7 @@ import { getSettings, updateSettings } from "./settings";
 import { checkAdminKey, createSession, verifySession, clientIp, rateLimitLogin, requireAdminIp } from "./auth";
 import { pickLang } from "./i18n";
 import { hashPassword } from "./public";
+import { handleFolderAdmin, folderExists, validPath } from "./folders";
 import { parseUA } from "./ua";
 import { encryptSecret, decryptSecret, totpGenerateSecret, totpVerify, totpUri, totpGenerateRecoveryCodes, sha256Hex, safeEqual } from "./crypto";
 import { createStorageProvider, type StorageProvider } from "./storage";
@@ -66,6 +67,7 @@ interface UploadSession {
   part_count: number;
   expires_at: number;
   completed_file_id: string | null;
+  path: string;
 }
 
 async function uploadSession(env: Env, id: string): Promise<UploadSession | null> {
@@ -247,6 +249,9 @@ export async function handleAdminApi(
   const unauthorized = await requireAuth(req, env);
   if (unauthorized) return unauthorized;
 
+  const folderResponse = await handleFolderAdmin(req, env, path);
+  if (folderResponse) return folderResponse;
+
   // 登出
   if (path === "/api/admin/logout" && method === "POST") {
     const secure = url.protocol === "https:";
@@ -336,7 +341,7 @@ export async function handleAdminApi(
   // ── 文件列表 ──────────────────────────────────────
   if (path === "/api/admin/files" && method === "GET") {
     const { results } = await env.db.prepare(
-      `SELECT f.id, f.name, f.size, f.mime, f.uploaded_at,
+      `SELECT f.id, f.name, f.size, f.mime, f.uploaded_at, f.path,
               (SELECT COUNT(*) FROM shares s WHERE s.file_id = f.id) AS share_count,
               (SELECT COALESCE(SUM(s.download_count), 0) FROM shares s WHERE s.file_id = f.id) AS download_count
        FROM files f ORDER BY f.uploaded_at DESC`
@@ -355,6 +360,9 @@ export async function handleAdminApi(
       name = sanitizeName(rawName);
     }
     if (!req.body) return json({ error: msg(req, "请求体为空", "Empty request body") }, 400);
+    const targetPath = req.headers.get("x-folder-path") || "/";
+    if (targetPath !== "/" && (!validPath(targetPath) || !(await folderExists(env, targetPath))))
+      return json({ error: msg(req, "目标文件夹不存在", "Target folder not found") }, 404);
     const id = randomId(14);
     const key = `files/${id}`;
     const mime = req.headers.get("content-type") || "application/octet-stream";
@@ -372,9 +380,9 @@ export async function handleAdminApi(
     // ── Bug #4 修复：D1 写入失败时清理已写入的 storage 对象 ──
     try {
       await env.db.prepare(
-        "INSERT INTO files(id, key, name, size, mime, uploaded_at) VALUES(?1, ?2, ?3, ?4, ?5, ?6)"
+        "INSERT INTO files(id, key, name, size, mime, uploaded_at, path) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)"
       )
-        .bind(id, key, name, resultSize, mime, Date.now())
+        .bind(id, key, name, resultSize, mime, Date.now(), targetPath === "/" ? `/${name}` : `${targetPath}/${name}`)
         .run();
     } catch (dbErr) {
       ctx.waitUntil(st.delete(key).catch(() => {}));
@@ -390,11 +398,14 @@ export async function handleAdminApi(
     if (st.kind !== "r2" || !env.r2) {
       return json({ error: msg(req, "大文件分段上传需要 R2 存储后端", "Large multipart uploads require R2 storage") }, 400);
     }
-    const body = await readJson<{ name: string; size: number; mime: string }>(req);
+    const body = await readJson<{ name: string; size: number; mime: string; path?: string }>(req);
     const size = Number(body.size);
     if (typeof body.name !== "string" || !Number.isSafeInteger(size) || size <= UPLOAD_PART_MAX) {
       return json({ error: msg(req, "文件信息无效", "Invalid file metadata") }, 400);
     }
+    const targetPath = body.path || "/";
+    if (targetPath !== "/" && (!validPath(targetPath) || !(await folderExists(env, targetPath))))
+      return json({ error: msg(req, "目标文件夹不存在", "Target folder not found") }, 404);
     const partSize = Math.min(UPLOAD_PART_MAX, Math.max(UPLOAD_PART_MIN, Math.ceil(size / UPLOAD_MAX_PARTS)));
     const partCount = Math.ceil(size / partSize);
     if (partCount > UPLOAD_MAX_PARTS) {
@@ -432,9 +443,9 @@ export async function handleAdminApi(
     const now = Date.now();
     try {
       await env.db.prepare(
-        `INSERT INTO upload_sessions(id, r2_upload_id, key, name, size, mime, part_size, part_count, created_at, expires_at)
-         VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)`
-      ).bind(id, upload.uploadId, key, name, size, mime, partSize, partCount, now, now + UPLOAD_SESSION_MS).run();
+        `INSERT INTO upload_sessions(id, r2_upload_id, key, name, size, mime, part_size, part_count, created_at, expires_at, path)
+         VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)`
+      ).bind(id, upload.uploadId, key, name, size, mime, partSize, partCount, now, now + UPLOAD_SESSION_MS, targetPath).run();
     } catch (error) {
       await upload.abort().catch(() => {});
       throw error;
@@ -453,7 +464,7 @@ export async function handleAdminApi(
       const parts = session.completed_file_id ? [] : (await env.db.prepare(
         "SELECT part_number FROM upload_parts WHERE session_id = ?1 ORDER BY part_number"
       ).bind(session.id).all<{ part_number: number }>()).results ?? [];
-      return json({ ok: true, name: session.name, size: session.size,
+      return json({ ok: true, name: session.name, size: session.size, path: session.path,
         partSize: session.part_size, partCount: session.part_count,
         uploadedParts: parts.map((p) => p.part_number), fileId: session.completed_file_id });
     }
@@ -519,9 +530,10 @@ export async function handleAdminApi(
       return json({ error: msg(req, "合并后的文件大小不符，请重新上传", "Completed file size mismatch; upload again") }, 409);
     }
     await env.db.prepare(
-      `INSERT INTO files(id, key, name, size, mime, uploaded_at) VALUES(?1, ?2, ?3, ?4, ?5, ?6)
+      `INSERT INTO files(id, key, name, size, mime, uploaded_at, path) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)
        ON CONFLICT(id) DO NOTHING`
-    ).bind(session.id, session.key, session.name, session.size, session.mime, Date.now()).run();
+    ).bind(session.id, session.key, session.name, session.size, session.mime, Date.now(),
+      session.path === "/" ? `/${session.name}` : `${session.path}/${session.name}`).run();
     const file = await env.db.prepare("SELECT key, size FROM files WHERE id = ?1")
       .bind(session.id).first<{ key: string; size: number }>();
     if (file?.key !== session.key || file.size !== session.size) {
@@ -531,6 +543,27 @@ export async function handleAdminApi(
       .bind(session.id).run();
     await env.db.prepare("DELETE FROM upload_parts WHERE session_id = ?1").bind(session.id).run();
     return json({ ok: true, id: session.id, name: session.name, size: session.size }, 201);
+  }
+
+  // ── 移动文件（保持对象 key 与已有分享不变） ──────────
+  const moveFileMatch = /^\/api\/admin\/files\/([^/]+)\/move$/.exec(path);
+  if (moveFileMatch && method === "POST") {
+    const body = await readJson<{ path: string }>(req);
+    const targetPath = body.path;
+    if (targetPath !== "/" && (!validPath(targetPath) || !(await folderExists(env, targetPath))))
+      return json({ error: msg(req, "目标文件夹不存在", "Target folder not found") }, 404);
+    const file = await env.db.prepare("SELECT id, name, path FROM files WHERE id = ?1")
+      .bind(moveFileMatch[1]).first<{ id: string; name: string; path: string }>();
+    if (!file) return json({ error: msg(req, "文件不存在", "File not found") }, 404);
+    const destination = targetPath === "/" ? `/${file.name}` : `${targetPath}/${file.name}`;
+    if (file.path === destination) return json({ ok: true, path: destination });
+    const [sameName, directory] = await Promise.all([
+      env.db.prepare("SELECT 1 FROM files WHERE path = ?1 AND id <> ?2 LIMIT 1").bind(destination, file.id).first(),
+      folderExists(env, destination),
+    ]);
+    if (sameName || directory) return json({ error: msg(req, "目标文件夹已有同名文件或文件夹", "A file or folder with this name already exists") }, 409);
+    await env.db.prepare("UPDATE files SET path = ?1 WHERE id = ?2").bind(destination, file.id).run();
+    return json({ ok: true, path: destination });
   }
 
   // ── 删除文件（连带存储对象、分享、日志） ──────────
@@ -654,7 +687,7 @@ export async function handleAdminApi(
     return json({ shares });
   }
 
-  // ── 清理失效分享（过期 / 已撤销 / 达上限） + 孤儿 files + 孤儿 R2 对象 ──
+  // ── 清理失效分享（文件本体由文件管理单独删除） ──
   if (path === "/api/admin/shares/cleanup" && method === "POST") {
     const now = Date.now();
     // 1. 删除失效 shares
@@ -664,46 +697,11 @@ export async function handleAdminApi(
       .bind(now)
       .run();
 
-    // 2. 查出孤儿 files：没有任何 share 引用的文件（LEFT JOIN 反查）
-    const orphans = await env.db.prepare(
-      `SELECT f.id, f.key FROM files f
-       LEFT JOIN shares s ON s.file_id = f.id
-       WHERE s.id IS NULL`
-    ).all<{ id: string; key: string }>();
-
-    const orphanIds = (orphans.results ?? []).map((o) => o.id);
-    const orphanKeys = (orphans.results ?? []).map((o) => o.key);
-
-    // 3. 删除孤儿 files 的 DB 记录 + 关联 download_logs
-    if (orphanIds.length > 0) {
-      // D1 支持 IN (...) 参数绑定
-      const placeholders = orphanIds.map((_, i) => `?${i + 1}`).join(", ");
-      await env.db.batch([
-        env.db.prepare(`DELETE FROM download_logs WHERE file_id IN (${placeholders})`).bind(...orphanIds),
-        env.db.prepare(`DELETE FROM files WHERE id IN (${placeholders})`).bind(...orphanIds),
-      ]);
-    }
-
-    // 4. 异步清理孤儿存储对象（不阻塞响应，批量删除可能慢）
-    if (orphanKeys.length > 0) {
-      ctx.waitUntil(
-        (async () => {
-          const st = await storage(env);
-          for (const key of orphanKeys) {
-            try {
-              await st.delete(key);
-            } catch {
-              // 删除失败不影响 DB 清理结果，静默跳过
-            }
-          }
-        })()
-      );
-    }
-
     return json({
       ok: true,
+      deleted: deleted.meta.changes ?? 0,
       deleted_shares: deleted.meta.changes ?? 0,
-      deleted_orphan_files: orphanIds.length,
+      deleted_orphan_files: 0,
     });
   }
 

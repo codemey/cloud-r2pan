@@ -3,6 +3,8 @@ import { ensureSchema } from "./db";
 import { handleAdminApi } from "./admin";
 import { handleDownload, handleDirectDownload, handleShareInfo, handleVerify } from "./public";
 import { serveAdminPage, serveSharePage, serveMarketPage, errorPage } from "./pages";
+import { serveFolderPage } from "./pages";
+import { handleFolderPublic } from "./folders";
 import {
   handleOAuthStart,
   handleOAuthCallback,
@@ -257,6 +259,16 @@ async function route(req: Request, env: Env, ctx: ExecutionContext): Promise<Res
       return handleDownload(req, env, ctx, token);
     }
     return notFound(req);
+  }
+
+  const folderMatch = /^\/f\/([A-Za-z0-9]+)(?:\/(info|verify|manifest|file\/([A-Za-z0-9]+)))?\/?$/.exec(path);
+  if (folderMatch) {
+    await ensureSchema(env);
+    if (!folderMatch[2]) {
+      if (req.method !== "GET" && req.method !== "HEAD") return new Response("Method Not Allowed", { status: 405 });
+      return serveFolderPage(req);
+    }
+    return handleFolderPublic(req, env, ctx, folderMatch[1], folderMatch[2].startsWith("file/") ? "file" : folderMatch[2], folderMatch[3]);
   }
 
   // ══════════════════════════════════════════════════════════════

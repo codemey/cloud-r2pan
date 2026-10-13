@@ -141,7 +141,7 @@ export async function hashPassword(password: string): Promise<string> {
   return salt + ":" + await sha256Hex(salt + ":" + password);
 }
 /** 常数时间校验密码 */
-async function verifyPassword(stored: string, password: string): Promise<boolean> {
+export async function verifyPassword(stored: string, password: string): Promise<boolean> {
   const i = stored.indexOf(":");
   if (i < 0) return false;
   const salt = stored.slice(0, i);
@@ -150,13 +150,13 @@ async function verifyPassword(stored: string, password: string): Promise<boolean
   return safeEqual(want, got);
 }
 /** 颁发短时下载授权令牌：格式 `${到期时间戳}.${HMAC}` */
-async function issueToken(env: Env, token: string): Promise<string> {
+export async function issueToken(env: Env, token: string): Promise<string> {
   const exp = Date.now() + TOKEN_TTL_MS;
   const sig = await hmacHex(env.admin, `${token}:${exp}`);
   return `${exp}.${sig}`;
 }
 /** 校验下载授权令牌（存在于 URL query string 中） */
-async function verifyShareToken(env: Env, token: string, query: string): Promise<boolean> {
+export async function verifyShareToken(env: Env, token: string, query: string): Promise<boolean> {
   const t = new URLSearchParams(query).get("t");
   if (!t) return false;
   const i = t.indexOf(".");
@@ -556,7 +556,7 @@ interface StreamFileRow {
   download_name?: string | null;
 }
 
-async function streamFile(
+export async function streamFile(
   req: Request,
   env: Env,
   ctx: ExecutionContext,

@@ -648,10 +648,11 @@ async function handleWebDavDelete(env: Env, internalPath: string): Promise<Respo
   if (await directoryExists(env, internalPath)) {
     // 递归删除目录下所有文件
     const st = await storage(env);
-    const likePattern = internalPath + "/%";
+    const lower = internalPath + "/";
+    const upper = internalPath + "0";
     const { results: files } = await env.db
-      .prepare("SELECT id, key FROM files WHERE path LIKE ?1")
-      .bind(likePattern)
+      .prepare("SELECT id, key FROM files WHERE path >= ?1 AND path < ?2")
+      .bind(lower, upper)
       .all<{ id: string; key: string }>();
 
     for (const f of files) {
@@ -663,8 +664,10 @@ async function handleWebDavDelete(env: Env, internalPath: string): Promise<Respo
       await st.delete(f.key).catch(() => {});
     }
 
-    // 删除目录本身（directories 表）
-    await env.db.prepare("DELETE FROM directories WHERE path = ?1").bind(internalPath).run();
+    await env.db.batch([
+      env.db.prepare("DELETE FROM directories WHERE path = ?1 OR (path >= ?2 AND path < ?3)").bind(internalPath, lower, upper),
+      env.db.prepare("DELETE FROM folder_shares WHERE path = ?1 OR (path >= ?2 AND path < ?3)").bind(internalPath, lower, upper),
+    ]);
 
     return new Response("", { status: 204 });
   }
@@ -859,10 +862,11 @@ async function moveFile(env: Env, srcPath: string, destPath: string): Promise<vo
 /* ═══════════ 辅助：移动目录（递归更新 path 前缀） ═══════════ */
 
 async function moveDirectory(env: Env, srcDir: string, destDir: string): Promise<void> {
-  const likePattern = srcDir === "/" ? "/%" : srcDir + "/%";
+  const lower = srcDir + "/";
+  const upper = srcDir + "0";
   const { results: files } = await env.db
-    .prepare("SELECT id, path FROM files WHERE path LIKE ?1")
-    .bind(likePattern)
+    .prepare("SELECT id, path FROM files WHERE path >= ?1 AND path < ?2")
+    .bind(lower, upper)
     .all<{ id: string; path: string }>();
 
   for (const f of files) {
@@ -878,8 +882,8 @@ async function moveDirectory(env: Env, srcDir: string, destDir: string): Promise
 
   // 也更新 directories 表中的子目录记录
   const { results: dirs } = await env.db
-    .prepare("SELECT path FROM directories WHERE path LIKE ?1")
-    .bind(likePattern)
+    .prepare("SELECT path FROM directories WHERE path >= ?1 AND path < ?2")
+    .bind(lower, upper)
     .all<{ path: string }>();
 
   for (const d of dirs) {
@@ -898,4 +902,7 @@ async function moveDirectory(env: Env, srcDir: string, destDir: string): Promise
   await env.db.prepare("DELETE FROM directories WHERE path = ?1").bind(srcDir).run();
   await env.db.prepare("INSERT INTO directories(path, created_at) VALUES(?1, ?2) ON CONFLICT(path) DO NOTHING")
     .bind(destDir, Date.now()).run();
+  await env.db.prepare(
+    "UPDATE folder_shares SET path = ?1 || substr(path, ?2) WHERE path = ?3 OR (path >= ?4 AND path < ?5)"
+  ).bind(destDir, srcDir.length + 1, srcDir, lower, upper).run();
 }

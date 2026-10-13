@@ -58,6 +58,18 @@ const SCHEMA_STATEMENTS: string[] = [
   )`,
   `CREATE INDEX IF NOT EXISTS idx_shares_file ON shares(file_id)`,
   `CREATE INDEX IF NOT EXISTS idx_shares_market ON shares(is_market, revoked)`,
+  `CREATE TABLE IF NOT EXISTS folder_shares (
+    id TEXT PRIMARY KEY,
+    path TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    expires_at INTEGER,
+    max_downloads INTEGER,
+    download_count INTEGER NOT NULL DEFAULT 0,
+    revoked INTEGER NOT NULL DEFAULT 0,
+    password_hash TEXT,
+    password_cipher TEXT
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_folder_shares_path ON folder_shares(path)`,
   `CREATE TABLE IF NOT EXISTS direct_links (
     id TEXT PRIMARY KEY,
     file_id TEXT NOT NULL,
@@ -187,6 +199,7 @@ export const EXPECTED_TABLES = [
   "turnstile_visits", "banned_ips", "settings", "traffic_stats",
   "oauth_states", "oauth_providers", "activation_plans", "activation_codes",
   "directories",
+  "folder_shares",
 ];
 
 let schemaReady = false;
@@ -223,6 +236,7 @@ const MIGRATION_STATEMENTS: string[] = [
   // ═══════════ WebDAV 虚拟目录 ═══════════
   "ALTER TABLE files ADD COLUMN path TEXT NOT NULL DEFAULT '/'",
   "CREATE INDEX IF NOT EXISTS idx_files_path ON files(path)",
+  "ALTER TABLE upload_sessions ADD COLUMN path TEXT NOT NULL DEFAULT '/'",
 ];
 
 /**
@@ -337,12 +351,14 @@ const EXPECTED_COLUMNS: { table: string; column: string }[] = [
   { table: "shares", column: "market_desc" },
   { table: "download_logs", column: "activation_code" },
   { table: "files", column: "path" },
+  { table: "upload_sessions", column: "path" },
 ];
 
 /** 预期的索引（同样是可能缺失的） */
 const EXPECTED_INDEXES: string[] = [
   "idx_shares_market",
   "idx_files_path",
+  "idx_folder_shares_path",
 ];
 
 export interface SchemaStatus {

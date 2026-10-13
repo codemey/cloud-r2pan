@@ -1,0 +1,237 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>文件夹分享</title>
+  <style>
+    :root { color-scheme: dark; font-family: system-ui, "Microsoft YaHei", sans-serif; background:#111923; color:#eaf1f5; }
+    * { box-sizing:border-box; }
+    body { margin:0; min-height:100vh; background:#111923; }
+    header { border-bottom:1px solid #34414a; background:#17212b; }
+    .inner { width:min(960px, calc(100% - 32px)); margin:auto; }
+    header .inner { display:flex; align-items:center; justify-content:space-between; min-height:62px; gap:16px; }
+    .brand { font-weight:700; color:#f4f7f8; }
+    main { padding:30px 0 56px; }
+    .heading { display:flex; align-items:flex-start; justify-content:space-between; gap:20px; margin-bottom:24px; }
+    h1 { font-size:25px; line-height:1.3; margin:0 0 8px; overflow-wrap:anywhere; }
+    .muted { color:#a5b5c0; font-size:14px; }
+    .stats { display:flex; gap:20px; flex-wrap:wrap; margin-top:12px; }
+    button { border:1px solid #53636f; border-radius:6px; background:#263746; color:#f3f8fa; font:inherit; padding:10px 14px; cursor:pointer; }
+    button:hover { background:#344b5e; }
+    button:disabled { opacity:.45; cursor:default; }
+    button.primary { background:#2d8870; border-color:#399c83; color:white; font-weight:650; }
+    button.primary:hover { background:#36a186; }
+    a.primary { display:inline-flex; align-items:center; border:1px solid #399c83; border-radius:6px; background:#2d8870;
+      color:white; font-weight:650; text-decoration:none; padding:10px 14px; }
+    a.primary:hover { background:#36a186; }
+    button.small { padding:6px 11px; font-size:13px; white-space:nowrap; }
+    .toolbar { display:flex; align-items:center; gap:10px; flex-wrap:wrap; padding:14px 0; border-top:1px solid #34414a; border-bottom:1px solid #34414a; }
+    .toolbar .spacer { flex:1; }
+    input { width:min(300px, 100%); background:#1d2b36; color:white; border:1px solid #53636f; border-radius:6px; padding:10px 12px; font:inherit; }
+    input:focus { outline:2px solid #399c83; outline-offset:2px; }
+    .notice { color:#ffd18a; font-size:13px; }
+    .error { color:#ff998d; }
+    .progress { margin:16px 0; }
+    .track { height:7px; border-radius:4px; background:#364650; overflow:hidden; margin-top:8px; }
+    .fill { height:100%; width:0; background:#46b595; transition:width .2s; }
+    .table { width:100%; border-collapse:collapse; }
+    .table th { text-align:left; color:#a5b5c0; font-size:12px; font-weight:600; border-bottom:1px solid #34414a; padding:13px 10px; }
+    .table td { border-bottom:1px solid #283641; padding:12px 10px; font-size:14px; }
+    .table td:first-child { overflow-wrap:anywhere; }
+    .table td:last-child, .table th:last-child { text-align:right; }
+    .path { color:#eaf1f5; }
+    .file-icon { color:#5ec9a4; margin-right:9px; }
+    .dir-icon { color:#f3c67e; }
+    .empty { padding:32px 10px; text-align:center; color:#a5b5c0; }
+    @media (max-width:600px) { .heading { display:block; } main { padding-top:22px; } .table th:nth-child(2), .table td:nth-child(2) { display:none; } }
+  </style>
+</head>
+<body>
+  <header><div class="inner"><div class="brand" id="brand">文件分享</div><button class="small" id="language" type="button">English</button></div></header>
+  <main class="inner">
+    <div class="heading"><div><h1 id="title">正在加载…</h1><div class="muted" id="subtitle"></div><div class="stats muted" id="stats"></div></div></div>
+    <div class="toolbar" id="toolbar"></div>
+    <div id="progress" class="progress" hidden><div class="muted" id="progress-text"></div><div class="track"><div class="fill" id="progress-fill"></div></div></div>
+    <div class="notice" id="notice" role="status"></div>
+    <div id="contents"></div>
+  </main>
+  <script>
+    const token = location.pathname.split('/')[2];
+    const base = `/f/${token}`;
+    const $ = id => document.getElementById(id);
+    const lang = (localStorage.getItem('folder-lang') || (navigator.language.startsWith('zh') ? 'zh' : 'en'));
+    const messages = {
+      zh: { brand:'文件分享', loading:'正在加载…', missing:'分享链接不存在', gone:'分享已失效', expired:'分享已过期', maxed:'访问次数已达上限',
+        path:'文件夹', count:'{n} 个文件', size:'共 {n}', access:'查看文件', password:'访问密码', open:'验证并查看',
+        all:'下载全部', stop:'停止后续下载', file:'文件', sizeCol:'大小', action:'操作', download:'下载', empty:'此文件夹暂无文件',
+        unsupported:'大文件已交由浏览器下载列表，请在那里查看实际进度。',
+        destination:'文件会分别保存到浏览器默认下载目录。子目录路径会写入文件名。浏览器可能要求允许多个文件下载。',
+        preparing:'正在准备下载…', progress:'已处理 {files} / {count} 个文件 · 已读取 {done} / {total}', finished:'下载队列已完成',
+        stopped:'已停止后续下载', failed:'下载失败，请重试当前文件', badPassword:'密码错误', auth:'验证失败', oauth:'请先完成站点登录',
+        turnstile:'请完成人机验证', login:'使用 {provider} 登录', retry:'重试' },
+      en: { brand:'File Share', loading:'Loading…', missing:'Share link not found', gone:'Share revoked', expired:'Share expired', maxed:'Access limit reached',
+        path:'Folder', count:'{n} files', size:'Total {n}', access:'View files', password:'Password', open:'Verify and view',
+        all:'Download all', stop:'Stop next downloads', file:'File', sizeCol:'Size', action:'Action', download:'Download', empty:'This folder is empty',
+        unsupported:'Large files are in your browser download list. Check their progress there.',
+        destination:'Files go separately to your browser\'s default download folder. Subfolder paths are included in file names. Your browser may ask to allow multiple downloads.',
+        preparing:'Preparing downloads…', progress:'Handled {files} / {count} files · Read {done} / {total}', finished:'Download queue finished',
+        stopped:'Remaining downloads stopped', failed:'Download failed. Retry the current file.', badPassword:'Incorrect password', auth:'Verification failed', oauth:'Please sign in first',
+        turnstile:'Complete the verification', login:'Sign in with {provider}', retry:'Retry' }
+    };
+    const t = (key, values={}) => (messages[lang][key] || key).replace(/\{(\w+)\}/g, (_, k) => values[k] ?? '');
+    const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+    const fmtSize = bytes => bytes < 1024 ? `${bytes} B` : bytes < 1024 ** 2 ? `${(bytes / 1024).toFixed(1)} KB` : bytes < 1024 ** 3 ? `${(bytes / 1024 ** 2).toFixed(1)} MB` : `${(bytes / 1024 ** 3).toFixed(2)} GB`;
+    let info, manifest, ticket, oauthProviders=[], running=false, stopAfterCurrent=false;
+    const IN_PAGE_MAX = 32 * 1024 * 1024;
+    $('brand').textContent=t('brand'); $('language').textContent=lang==='zh'?'English':'中文';
+    $('language').onclick=()=>{ localStorage.setItem('folder-lang',lang==='zh'?'en':'zh'); location.reload(); };
+    $('title').textContent=t('loading');
+    const notice = (text, error=false) => { $('notice').textContent=text; $('notice').className=error?'notice error':'notice'; };
+    async function api(path, options) {
+      const response=await fetch(path, options);
+      const data=await response.json().catch(()=>({}));
+      if (!response.ok) throw new Error(data.error || t('auth'));
+      return data;
+    }
+    function stateTitle(status) { return ({gone:t('gone'),expired:t('expired'),maxed:t('maxed')})[status] || t('missing'); }
+    function renderInfo() {
+      $('title').textContent=info.name;
+      document.title=`${info.name} · ${info.site_title || t('brand')}`;
+      $('subtitle').textContent=`${t('path')}: ${info.path}`;
+      $('stats').textContent=info.max_downloads ? `${info.downloads} / ${info.max_downloads}` : '';
+      if (info.status!=='ok' && !ticket) { $('contents').innerHTML=`<div class="empty">${esc(stateTitle(info.status))}</div>`; return; }
+      if (info.oauth?.enabled && !info.oauth.authed) {
+        $('toolbar').innerHTML=oauthProviders.map(provider=>{
+          const loginUrl=new URL(provider.start_url,location.origin);
+          loginUrl.searchParams.set('redirect',location.pathname);
+          return `<a class="primary" href="${esc(loginUrl.pathname+loginUrl.search)}">${esc(t('login',{provider:provider.label || provider.name}))}</a>`;
+        }).join('');
+        notice(t('oauth'));
+        return;
+      }
+      $('toolbar').innerHTML=`${info.needs_password?`<input id="password" type="password" autocomplete="current-password" placeholder="${esc(t('password'))}">`:''}
+        <button class="primary" type="button" id="view-files">${esc(info.needs_password?t('open'):t('access'))}</button>`;
+      $('view-files').onclick=unlock;
+      $('password')?.addEventListener('keydown',e=>{if(e.key==='Enter')unlock();});
+      notice(t('destination'));
+      if (info.turnstile?.needs_now && info.turnstile.sitekey) {
+        const wrap=document.createElement('div'); wrap.id='turnstile'; $('toolbar').prepend(wrap);
+        const script=document.createElement('script'); script.src='https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit';
+        script.onload=()=>window.turnstile.render('#turnstile',{sitekey:info.turnstile.sitekey,callback:value=>{window.folderTurnstile=value;}});
+        document.head.append(script);
+      }
+    }
+    async function unlock() {
+      const button=$('view-files'); button.disabled=true;
+      try {
+        const result=await api(`${base}/verify`, {method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({password:$('password')?.value || '',turnstile:window.folderTurnstile || ''})});
+        ticket=result.ticket;
+        sessionStorage.setItem(`folder-ticket:${token}`,ticket);
+        await loadManifest();
+      } catch(error) {
+        notice(error.message==='bad_password'?t('badPassword'):error.message==='oauth_required'?t('oauth'):error.message==='turnstile_failed'?t('turnstile'):error.message,true);
+        button.disabled=false;
+      }
+    }
+    async function loadManifest() {
+      manifest=await api(`${base}/manifest?t=${encodeURIComponent(ticket)}`);
+      const total=manifest.files.reduce((sum,file)=>sum+file.size,0);
+      $('stats').textContent=`${t('count',{n:manifest.files.length})} · ${t('size',{n:fmtSize(total)})}`;
+      $('toolbar').innerHTML=`<button class="primary" type="button" id="download-all" ${manifest.files.length?'':'disabled'}>${esc(t('all'))}</button>
+        <button type="button" id="stop" hidden>${esc(t('stop'))}</button><span class="spacer"></span>`;
+      $('download-all').onclick=downloadAll;
+      $('stop').onclick=()=>{stopAfterCurrent=true;};
+      const dirs=manifest.directories.map(path=>`<tr><td class="path"><span class="file-icon dir-icon">▸</span>${esc(path)}/</td><td></td><td></td></tr>`).join('');
+      const files=manifest.files.map((file,index)=>`<tr><td class="path"><span class="file-icon">▣</span>${esc(file.path)}</td>
+        <td class="muted">${fmtSize(file.size)}</td><td><button class="small" type="button" data-file="${index}">${esc(t('download'))}</button></td></tr>`).join('');
+      $('contents').innerHTML=files||dirs?`<table class="table"><thead><tr><th>${esc(t('file'))}</th><th>${esc(t('sizeCol'))}</th><th>${esc(t('action'))}</th></tr></thead><tbody>${dirs}${files}</tbody></table>`
+        :`<div class="empty">${esc(t('empty'))}</div>`;
+      document.querySelectorAll('[data-file]').forEach(button=>button.onclick=()=>downloadOne(manifest.files[Number(button.dataset.file)]));
+      notice(t('destination'));
+    }
+    function fileUrl(file) {
+      const url=new URL(`${base}/file/${file.id}`,location.origin);
+      url.searchParams.set('t',ticket);
+      return url.href;
+    }
+    function trigger(file) {
+      const a=document.createElement('a');
+      a.href=fileUrl(file);
+      a.download=file.path.replaceAll('/','__');
+      document.body.append(a); a.click(); a.remove();
+    }
+    async function transfer(file,update) {
+      if (file.size > IN_PAGE_MAX || !window.ReadableStream) { trigger(file); return false; }
+      const response=await fetch(fileUrl(file),{cache:'no-store'});
+      if (!response.ok || !response.body) throw new Error(t('failed'));
+      const reader=response.body.getReader();
+      const chunks=[];
+      let loaded=0;
+      for (;;) {
+        const {done,value}=await reader.read();
+        if(done) break;
+        chunks.push(value); loaded+=value.byteLength; update(loaded);
+      }
+      if(loaded!==file.size) throw new Error(t('failed'));
+      const blob=new Blob(chunks,{type:response.headers.get('content-type') || 'application/octet-stream'});
+      const blobUrl=URL.createObjectURL(blob);
+      const a=document.createElement('a');
+      a.href=blobUrl; a.download=file.path.replaceAll('/','__');
+      document.body.append(a); a.click(); a.remove();
+      setTimeout(()=>URL.revokeObjectURL(blobUrl),60_000);
+      return true;
+    }
+    function showProgress(done,total,files,count) {
+      $('progress').hidden=false;
+      $('progress-text').textContent=t('progress',{done:fmtSize(done),total:fmtSize(total),files,count});
+      $('progress-fill').style.width=`${total?Math.min(100,done/total*100):100}%`;
+    }
+    async function downloadOne(file) {
+      if (running) return;
+      running=true; notice('');
+      $('progress').hidden=true;
+      if(file.size<=IN_PAGE_MAX) showProgress(0,file.size,0,1);
+      try { const tracked=await transfer(file,loaded=>showProgress(loaded,file.size,0,1));
+        if(tracked){showProgress(file.size,file.size,1,1);notice(t('finished'));}
+        else {$('progress').hidden=true;notice(t('unsupported'));} }
+      catch(error){notice(error?.message || t('failed'),true);}
+      finally {running=false;}
+    }
+    async function downloadAll() {
+      if (running) return;
+      running=true; stopAfterCurrent=false;
+      $('download-all').disabled=true; $('stop').hidden=false;
+      let done=0, completed=0, native=false;
+      const total=manifest.files.filter(file=>file.size<=IN_PAGE_MAX).reduce((sum,file)=>sum+file.size,0);
+      $('progress').hidden=total===0;
+      notice('');
+      try {
+        for(const file of manifest.files) {
+          if(stopAfterCurrent) break;
+          if(total) showProgress(done,total,completed,manifest.files.length);
+          const tracked=await transfer(file,loaded=>showProgress(done+loaded,total,completed,manifest.files.length));
+          if(tracked) done+=file.size;
+          else {native=true; await new Promise(resolve=>setTimeout(resolve,750));}
+          completed++;
+        }
+        if(total) showProgress(done,total,completed,manifest.files.length);
+        notice(stopAfterCurrent?t('stopped'):native?t('unsupported'):t('finished'));
+      } catch(error) {notice(error?.message || t('failed'),true);}
+      finally {running=false; $('download-all').disabled=false; $('stop').hidden=true;}
+    }
+    (async()=>{
+      try {
+        info=await api(`${base}/info`);
+        if(info.oauth?.enabled && !info.oauth.authed) {
+          oauthProviders=(await api('/oauth/providers').catch(()=>({providers:[]}))).providers || [];
+        }
+        ticket=sessionStorage.getItem(`folder-ticket:${token}`);
+        if(ticket && (!info.oauth?.enabled || info.oauth.authed)) { try { await loadManifest(); $('title').textContent=info.name; $('subtitle').textContent=`${t('path')}: ${info.path}`; return; }
+          catch { ticket=null; sessionStorage.removeItem(`folder-ticket:${token}`); } }
+        renderInfo();
+      } catch { $('title').textContent=t('missing'); }
+    })();
+  </script>
+</body>
+</html>

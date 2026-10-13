@@ -1,5 +1,6 @@
 import adminHTML from "../public/admin.html";
 import shareHTML from "../public/share.html";
+import folderHTML from "../public/folder.html";
 import marketHTML from "../public/market.html";
 import { pickLang, type L10n } from "./i18n";
 
@@ -96,6 +97,10 @@ export async function serveSharePage(req?: Request): Promise<Response> {
   const headers = new Headers({ "content-type": "text/html;charset=utf-8", "cache-control": "no-store" });
   addSecurityHeaders(headers);
   return new Response(shareHTML, { headers });
+}
+
+export async function serveFolderPage(req: Request): Promise<Response> {
+  return serveStaticHTML(folderHTML, req);
 }
 
 export async function serveMarketPage(req?: Request): Promise<Response> {
