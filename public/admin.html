@@ -1832,7 +1832,9 @@ async function loadOverview(){
 let _fileDir = '/';
 const folderParent = path => path.slice(0, path.lastIndexOf('/')) || '/';
 async function loadFiles(){
-  const [{ files: allFiles }, { folders }] = await Promise.all([api('/api/admin/files'), api('/api/admin/folders')]);
+  const [{ files: allFiles }, { folders }, { sessions: pendingUploads }] = await Promise.all([
+    api('/api/admin/files'), api('/api/admin/folders'), api('/api/admin/upload/multipart')
+  ]);
   if(_fileDir !== '/' && !folders.includes(_fileDir)) _fileDir = '/';
   const files = allFiles.filter(f => folderParent(f.path || `/${f.name}`) === _fileDir);
   const children = folders.filter(path => folderParent(path) === _fileDir);
@@ -1855,6 +1857,20 @@ async function loadFiles(){
       <select id="upload-target" style="min-width:180px;max-width:100%;padding:9px;border-radius:6px;background:var(--sf-input);color:var(--text);border:1px solid var(--stroke-strong)">${folderOptions}</select>
     </div>
     <div id="upload-list"></div>
+    ${pendingUploads.length ? `<div class="glass section">
+      <div class="section-title"><h2>${LANG === 'zh' ? '未完成上传' : 'Incomplete uploads'}（${pendingUploads.length}）</h2></div>
+      <div style="overflow-x:auto"><table class="tbl"><thead><tr>
+        <th>${esc(t('colName'))}</th><th>R2 Key</th><th>${esc(t('colSize'))}</th>
+        <th>${LANG === 'zh' ? '已上传分段' : 'Uploaded parts'}</th><th>${esc(t('colTime'))}</th><th>${esc(t('colActions'))}</th>
+      </tr></thead><tbody>${pendingUploads.map(s => `<tr>
+        <td class="name-cell">${esc(s.name)}</td>
+        <td class="mono" style="overflow-wrap:anywhere">${esc(s.key)}</td>
+        <td class="num">${fmtSize(s.size)}</td>
+        <td class="num">${s.uploaded_parts} / ${s.part_count}${s.expires_at < Date.now() ? ` · ${LANG === 'zh' ? '已过期' : 'Expired'}` : ''}</td>
+        <td class="num">${fmtTime(s.created_at)}</td>
+        <td><button class="btn sm danger" data-abort-upload="${esc(s.id)}" data-upload-key="${esc(s.key)}">${LANG === 'zh' ? '放弃并清理' : 'Discard upload'}</button></td>
+      </tr>`).join('')}</tbody></table></div>
+    </div>` : ''}
     <div class="glass section">
       <div class="section-title" style="gap:12px;flex-wrap:wrap"><h2>📁 ${esc(_fileDir === '/' ? t('allFiles') : _fileDir)}（${files.length + children.length}）</h2>
         <div class="row" style="gap:8px;flex-wrap:wrap"><button class="btn sm" id="new-folder">${LANG === 'zh' ? '新建文件夹' : 'New folder'}</button>
@@ -1890,6 +1906,23 @@ async function loadFiles(){
   dz.ondragleave = () => dz.classList.remove('over');
   dz.ondrop = e => { e.preventDefault(); dz.classList.remove('over'); uploadFiles([...e.dataTransfer.files]); };
   fi.onchange = () => { uploadFiles([...fi.files]); fi.value = ''; };
+
+  $$('[data-abort-upload]').forEach(b => b.onclick = async () => {
+    const key = b.dataset.uploadKey;
+    if(!(await confirmDialog(LANG === 'zh' ? '放弃未完成上传' : 'Discard incomplete upload',
+      LANG === 'zh' ? `中止 ${key} 并清理已上传的分段？这不会删除已完成的文件。` :
+        `Abort ${key} and remove its uploaded parts? Completed files are not deleted.`, true))) return;
+    try {
+      await api(`/api/admin/upload/multipart/${b.dataset.abortUpload}`, { method:'DELETE' });
+      for(let i=localStorage.length-1;i>=0;i--){
+        const storageKey=localStorage.key(i);
+        if(storageKey?.startsWith('r2pan:upload:') && localStorage.getItem(storageKey)===b.dataset.abortUpload)
+          localStorage.removeItem(storageKey);
+      }
+      toast(LANG === 'zh' ? '未完成上传已清理' : 'Incomplete upload removed');
+      loadFiles();
+    } catch(e) { toast(e.message, 'err'); }
+  });
 
   $$('[data-folder]').forEach(b => b.onclick = () => { _fileDir=b.dataset.folder; loadFiles(); });
   $$('[data-share-folder]').forEach(b => b.onclick = () => openFolderShareModal(b.dataset.shareFolder));

@@ -393,6 +393,19 @@ export async function handleAdminApi(
   }
 
   // 大文件只在 R2 binding 上使用原生 multipart；每个请求仅传一个分段。
+  if (path === "/api/admin/upload/multipart" && method === "GET") {
+    const { results } = await env.db.prepare(
+      `SELECT s.id, s.key, s.name, s.size, s.path, s.part_count, s.created_at, s.expires_at,
+              (SELECT COUNT(*) FROM upload_parts p WHERE p.session_id = s.id) AS uploaded_parts
+       FROM upload_sessions s WHERE s.completed_file_id IS NULL
+       ORDER BY s.created_at DESC LIMIT 500`
+    ).all<{
+      id: string; key: string; name: string; size: number; path: string;
+      part_count: number; created_at: number; expires_at: number; uploaded_parts: number;
+    }>();
+    return json({ sessions: results });
+  }
+
   if (path === "/api/admin/upload/multipart" && method === "POST") {
     const st = await storage(env);
     if (st.kind !== "r2" || !env.r2) {
@@ -470,9 +483,16 @@ export async function handleAdminApi(
     }
     if (session.completed_file_id) return json({ error: msg(req, "文件已经上传完成", "Upload already completed") }, 409);
     if (!env.r2) return json({ error: "R2 binding missing" }, 500);
+    const registered = await env.db.prepare("SELECT 1 FROM files WHERE id = ?1 OR key = ?2 LIMIT 1")
+      .bind(session.id, session.key).first();
+    if (registered) return json({ error: msg(req, "文件已经登记，不能取消上传", "File is already registered") }, 409);
     const object = await env.r2.head(session.key);
-    if (object) await env.r2.delete(session.key);
-    else await env.r2.resumeMultipartUpload(session.key, session.r2_upload_id).abort();
+    if (object) return json({ error: msg(req, "完整对象已存在，不能按未完成上传删除", "Completed object exists; cannot abort as an incomplete upload") }, 409);
+    try {
+      await env.r2.resumeMultipartUpload(session.key, session.r2_upload_id).abort();
+    } catch (error) {
+      if (!/NoSuchUpload|10024/.test(String((error as Error)?.message ?? error))) throw error;
+    }
     await clearUploadSession(env, session.id);
     return json({ ok: true });
   }

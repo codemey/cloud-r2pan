@@ -41,8 +41,22 @@ test('multipart upload becomes one R2 file with resumable downloads', async () =
     plannedSessionId = plan.sessionId;
     assert.equal(plan.partSize, 32 * 1024 ** 2);
     assert.equal(plan.partCount, 80);
+    const plannedPart = await admin(`/api/admin/upload/multipart/${plannedSessionId}/parts/1`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/octet-stream' },
+      body: Buffer.alloc(plan.partSize, 7),
+    });
+    assert.equal(plannedPart.status, 200);
+    const pending = await admin('/api/admin/upload/multipart');
+    assert.equal(pending.status, 200);
+    const pendingRow = (await pending.json()).sessions.find(row => row.id === plannedSessionId);
+    assert.equal(pendingRow.key, `files/${plannedSessionId}`);
+    assert.equal(pendingRow.uploaded_parts, 1);
     const cancelled = await admin(`/api/admin/upload/multipart/${plannedSessionId}`, { method: 'DELETE' });
     assert.equal(cancelled.status, 200);
+    assert.equal((await admin(`/api/admin/upload/multipart/${plannedSessionId}`)).status, 404);
+    const afterAbort = await admin('/api/admin/upload/multipart');
+    assert.ok(!(await afterAbort.json()).sessions.some(row => row.id === plannedSessionId));
     plannedSessionId = undefined;
 
     const size = 90 * 1024 * 1024 + 17;
@@ -79,6 +93,10 @@ test('multipart upload becomes one R2 file with resumable downloads', async () =
     fileId = (await completed.json()).id;
     const again = await postJson(`/api/admin/upload/multipart/${sessionId}/complete`, {});
     assert.equal(again.status, 200);
+    const completedAbort = await admin(`/api/admin/upload/multipart/${sessionId}`, { method: 'DELETE' });
+    assert.equal(completedAbort.status, 409);
+    const afterComplete = await admin('/api/admin/upload/multipart');
+    assert.ok(!(await afterComplete.json()).sessions.some(row => row.id === sessionId));
 
     const files = await admin('/api/admin/files');
     const file = (await files.json()).files.find((row) => row.id === fileId);
