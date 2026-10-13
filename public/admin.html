@@ -460,6 +460,16 @@ body {
 .upload-item .prog i { display: block; height: 100%; width: 0; border-radius: 3px;
   background: linear-gradient(90deg,#34d399,#0a84ff); transition: width .2s; }
 .upload-item .pct { min-width: 44px; text-align: right; font-variant-numeric: tabular-nums; color: var(--text-2); }
+.upload-item .speed { min-width: 82px; text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; color: var(--text-3); }
+@media (max-width: 640px) {
+  .upload-item { display: grid; grid-template-columns: 44px minmax(0,1fr) auto auto; gap: 8px; }
+  .upload-item .ficon { grid-column: 1; grid-row: 1; }
+  .upload-item .upload-name { grid-column: 2; grid-row: 1; }
+  .upload-item .pct { grid-column: 3; grid-row: 1; }
+  .upload-item button { grid-column: 4; grid-row: 1; }
+  .upload-item .prog { grid-column: 1 / -1; grid-row: 2; width: 100%; }
+  .upload-item .speed { grid-column: 1 / -1; grid-row: 3; justify-self: end; }
+}
 
 /* ── 表单 ─────────────────────────────── */
 .field { margin-bottom: 14px; }
@@ -1999,10 +2009,33 @@ function uploadRequest(method, path, body, state, onProgress, headers={}){
   });
 }
 
-function uploadProgress(item, loaded, total){
+function formatUploadSpeed(bytesPerSecond){
+  return bytesPerSecond >= 1024 ** 2
+    ? `${(bytesPerSecond / 1024 ** 2).toFixed(2)} MB/s`
+    : `${(bytesPerSecond / 1024).toFixed(1)} KB/s`;
+}
+function renderUploadSpeed(item, state){
+  const now = performance.now();
+  const samples = state.speedSamples;
+  samples.push({ time: now, bytes: state.transferredBytes });
+  while(samples.length > 2 && samples[1].time < now - 3000) samples.shift();
+  const seconds = (now - samples[0].time) / 1000;
+  const bytes = state.transferredBytes - samples[0].bytes;
+  item.querySelector('.speed').textContent = seconds >= .25 && bytes > 0
+    ? formatUploadSpeed(bytes / seconds) : '0 KB/s';
+}
+function uploadProgress(item, loaded, total, state, seed=false){
   const pct = Math.min(99, Math.round(loaded / total * 100));
   item.querySelector('.prog i').style.width = pct + '%';
   item.querySelector('.pct').textContent = pct + '%';
+  if(seed){
+    state.lastLoaded = loaded;
+    state.speedSamples = [{ time: performance.now(), bytes: state.transferredBytes }];
+    return;
+  }
+  state.transferredBytes += Math.max(0, loaded - state.lastLoaded);
+  state.lastLoaded = loaded;
+  renderUploadSpeed(item, state);
 }
 
 async function uploadLargeFile(file, item, state, targetPath){
@@ -2031,7 +2064,7 @@ async function uploadLargeFile(file, item, state, targetPath){
     const partSize = session.partSize;
     const partLength = n => Math.min(partSize, file.size - (n - 1) * partSize);
     let completedBytes = [...done].reduce((sum, n) => sum + partLength(n), 0);
-    uploadProgress(item, completedBytes, file.size);
+    uploadProgress(item, completedBytes, file.size, state, true);
     for(let n = 1; n <= session.partCount; n++){
       if(state.cancelled) return;
       if(done.has(n)) continue;
@@ -2041,8 +2074,9 @@ async function uploadLargeFile(file, item, state, targetPath){
       for(let attempt = 0; attempt < 3; attempt++){
         if(state.cancelled) return;
         try {
+          state.lastLoaded = completedBytes;
           await uploadRequest('PUT', `/api/admin/upload/multipart/${sessionId}/parts/${n}`,
-            chunk, state, loaded => uploadProgress(item, completedBytes + loaded, file.size),
+            chunk, state, loaded => uploadProgress(item, completedBytes + loaded, file.size, state),
             { 'Content-Type':'application/octet-stream' });
           error = null;
           break;
@@ -2054,7 +2088,7 @@ async function uploadLargeFile(file, item, state, targetPath){
       }
       if(error) throw error;
       completedBytes += chunk.size;
-      uploadProgress(item, completedBytes, file.size);
+      uploadProgress(item, completedBytes, file.size, state);
     }
     await api(`/api/admin/upload/multipart/${sessionId}/complete`, { method:'POST' });
   }
@@ -2081,11 +2115,13 @@ function uploadFiles(files){
     if(file.size > MULTIPART_UPLOAD_MAX){ toast(t('tooLarge', {name:file.name}), 'err'); continue; }
     const item = document.createElement('div');
     item.className = 'upload-item glass';
-    item.innerHTML = `${ficon(file.name)}<span style="min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(file.name)}</span>
-      <div class="prog"><i></i></div><span class="pct">0%</span>
+    item.innerHTML = `${ficon(file.name)}<span class="upload-name" style="min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(file.name)}</span>
+      <div class="prog"><i></i></div><span class="pct">0%</span><span class="speed" title="${LANG === 'zh' ? '上传速度' : 'Upload speed'}">0 KB/s</span>
       <button class="btn sm" type="button" title="${esc(t('cancelUpload'))}" aria-label="${esc(t('cancelUpload'))}">×</button>`;
     $('#upload-list').prepend(item);
-    const state = { cancelled:false, xhr:null, sessionId:null, storageKey:null, abortRequested:false };
+    const state = { cancelled:false, xhr:null, sessionId:null, storageKey:null, abortRequested:false,
+      transferredBytes:0, lastLoaded:0, speedSamples:[{ time:performance.now(), bytes:0 }] };
+    state.speedTimer = setInterval(() => renderUploadSpeed(item, state), 500);
     activeUploadCount++;
     const cancel = item.querySelector('button');
     cancel.onclick = async () => {
@@ -2093,27 +2129,31 @@ function uploadFiles(files){
       state.xhr?.abort();
       await cancelMultipartUpload(state);
       item.querySelector('.pct').textContent = t('uploadCancelled');
+      item.querySelector('.speed').textContent = '';
       cancel.remove();
     };
     const promise = file.size > DIRECT_UPLOAD_MAX
       ? uploadLargeFile(file, item, state, targetPath)
       : uploadRequest('POST', '/api/admin/upload', file, state,
-          loaded => uploadProgress(item, loaded, file.size),
+          loaded => uploadProgress(item, loaded, file.size, state),
           { 'X-File-Name':encodeURIComponent(file.name), 'X-Folder-Path':targetPath,
             'Content-Type':file.type || 'application/octet-stream' });
     promise.then(() => {
       if(state.cancelled) return;
       item.querySelector('.prog i').style.width = '100%';
       item.querySelector('.pct').textContent = t('uploadDone');
+      item.querySelector('.speed').textContent = '';
       cancel.remove();
       toast(t('uploadOk', {name:file.name}));
       refreshFilesAfterUpload = true;
     }).catch(e => {
       if(state.cancelled) return;
       item.querySelector('.pct').textContent = t('uploadFailShort');
+      item.querySelector('.speed').textContent = '';
       cancel.remove();
       toast(`${t('uploadFail', {name:file.name})}: ${e.message}`, 'err');
     }).finally(() => {
+      clearInterval(state.speedTimer);
       activeUploadCount--;
       if(activeUploadCount === 0 && refreshFilesAfterUpload){
         refreshFilesAfterUpload = false;
