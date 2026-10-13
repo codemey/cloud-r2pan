@@ -661,7 +661,7 @@ const I18N = {
     quotaBannerD: '所有公开下载请求都会被拦截。你可以在「设置」中调高限额，或重置本月流量。',
     times: '次', unlimitedShort: '无限',
     // 表格列
-    colFile: '文件', colIP: 'IP', colBrowser: '浏览器', colOS: '系统', colTraffic: '流量', colTime: '时间',
+    colFile: '文件', colIP: 'IP', colBrowser: '浏览器', colOS: '系统', colTraffic: '流量', colRequestedTraffic: '请求流量', colTime: '时间',
     colCountry: '国家', colName: '文件名', colSize: '大小', colShareCount: '分享数', colDownloads: '下载量',
     colUploaded: '上传时间', colActions: '操作', colLink: '链接', colCreated: '创建时间',
     colExpires: '有效期', colStatus: '状态', colReason: '原因', colBannedAt: '封禁时间', colUntil: '到期',
@@ -1021,7 +1021,7 @@ const I18N = {
     quotaBannerD: 'All public download requests are blocked. Raise the limit in Settings or reset this month\'s traffic.',
     times: '', unlimitedShort: 'Unlimited',
     // 表格列
-    colFile: 'File', colIP: 'IP', colBrowser: 'Browser', colOS: 'OS', colTraffic: 'Traffic', colTime: 'Time',
+    colFile: 'File', colIP: 'IP', colBrowser: 'Browser', colOS: 'OS', colTraffic: 'Traffic', colRequestedTraffic: 'Requested traffic', colTime: 'Time',
     colCountry: 'Country', colName: 'Name', colSize: 'Size', colShareCount: 'Shares', colDownloads: 'Downloads',
     colUploaded: 'Uploaded', colActions: 'Actions', colLink: 'Link', colCreated: 'Created',
     colExpires: 'Expires', colStatus: 'Status', colReason: 'Reason', colBannedAt: 'Banned at', colUntil: 'Until',
@@ -2724,7 +2724,7 @@ async function loadLogs(){
       </div>
       ${d.logs.length ? `
       <div style="overflow-x:auto"><table class="tbl">
-        <thead><tr><th>${esc(t('colFile'))}</th><th>${esc(t('colIP'))}</th><th>${esc(t('colCountry'))}</th><th>${esc(t('colBrowser'))}</th><th>${esc(t('colOS'))}</th><th>${esc(t('colTraffic'))}</th><th>${esc(t('colTime'))}</th></tr></thead>
+        <thead><tr><th>${esc(t('colFile'))}</th><th>${esc(t('colIP'))}</th><th>${esc(t('colCountry'))}</th><th>${esc(t('colBrowser'))}</th><th>${esc(t('colOS'))}</th><th>${esc(t('colRequestedTraffic'))}</th><th>${esc(t('colTime'))}</th></tr></thead>
         <tbody>${d.logs.map(l => `
           <tr>
             <td class="name-cell" title="${esc(l.file_name)}">${ficon(l.file_name)} ${esc(l.file_name)}</td>

@@ -811,6 +811,7 @@ function render(d, siteName, oauthErr, oauthProviders){
 
 async function triggerDownload(d, ts, tsEnabled, tsOnDownload){
   const baseUrl = `/s/${token}/download`;
+  const downloadId = crypto.randomUUID();
   // 读取已绑定的激活码（从 localStorage）
   const code = getBoundCode();
   // both / on_download 模式：先确保有 token
@@ -827,12 +828,12 @@ async function triggerDownload(d, ts, tsEnabled, tsOnDownload){
         box.remove();
       }catch{ box.remove(); return; }
     }
-    let url = `${baseUrl}?cf=${tk}`;
+    let url = `${baseUrl}?dl=${downloadId}&cf=${tk}`;
     if(code) url += `&code=${encodeURIComponent(code)}`;
     location.href = url;
   } else {
-    let url = baseUrl;
-    if(code) url += `?code=${encodeURIComponent(code)}`;
+    let url = `${baseUrl}?dl=${downloadId}`;
+    if(code) url += `&code=${encodeURIComponent(code)}`;
     location.href = url;
   }
 }
@@ -881,11 +882,12 @@ async function wireUnlock(d, ts, tsEnabled, tsOnDownload){
             box.innerHTML = `<div class="ts-passed">${esc(t('turnstilePass'))}</div>`;
           }
           const sep = res.url.includes('?') ? '&' : '?';
-          let dlUrl = res.url + sep + 'cf=' + tk;
+          let dlUrl = res.url + sep + 'dl=' + crypto.randomUUID() + '&cf=' + tk;
           if(code){ const s2 = dlUrl.includes('?') ? '&' : '?'; dlUrl += s2 + 'code=' + encodeURIComponent(code); }
           location.href = dlUrl;
         } else {
-          let dlUrl = res.url;
+          const sep = res.url.includes('?') ? '&' : '?';
+          let dlUrl = res.url + sep + 'dl=' + crypto.randomUUID();
           if(code){ const s2 = dlUrl.includes('?') ? '&' : '?'; dlUrl += s2 + 'code=' + encodeURIComponent(code); }
           location.href = dlUrl;
         }

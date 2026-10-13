@@ -124,6 +124,27 @@ function parseRange(header: string | null, size: number): { offset: number; leng
   return { offset, length };
 }
 
+const DOWNLOAD_SESSION_IDLE_MS = 30 * 60_000;
+
+interface DownloadSession {
+  group: string;
+  key: string;
+  existing: boolean;
+}
+
+async function resolveDownloadSession(req: Request, env: Env, token: string, fileId: string): Promise<DownloadSession> {
+  const now = Date.now();
+  const downloadId = new URL(req.url).searchParams.get("dl");
+  const clientId = downloadId && /^[A-Za-z0-9_-]{16,64}$/.test(downloadId) ? downloadId : "direct-link";
+  const group = await sha256Hex([token, fileId, clientIp(req), (req.headers.get("user-agent") ?? "").slice(0, 500), clientId].join("\0"));
+  const active = await env.db.prepare(
+    "SELECT session_key FROM download_logs WHERE session_group = ?1 AND last_seen >= ?2 ORDER BY last_seen DESC LIMIT 1"
+  ).bind(group, now - DOWNLOAD_SESSION_IDLE_MS).first<{ session_key: string }>();
+  if (active) return { group, key: active.session_key, existing: true };
+  // A stable bucket also merges concurrent first Range requests before either insert completes.
+  return { group, key: await sha256Hex(`${group}:${Math.floor(now / DOWNLOAD_SESSION_IDLE_MS)}`), existing: false };
+}
+
 function fixedLengthBody(body: ReadableStream<Uint8Array>, length: number): ReadableStream<Uint8Array> | null {
   if (length === 0) return null;
   const { readable, writable } = new FixedLengthStream(length);
@@ -356,10 +377,11 @@ export async function handleDownload(
     { zh: "该分享已被管理员撤销。", en: "This share has been revoked." });
   if (row.expires_at && row.expires_at < Date.now()) return errorPage(req, 410, { zh: "链接已过期", en: "Link Expired" },
     { zh: "该分享已超过有效期。", en: "This share has expired." });
-  if (row.max_downloads && row.download_count >= row.max_downloads) return errorPage(req, 410, { zh: "下载次数已达上限", en: "Download Limit Reached" },
+  const downloadSession = req.method === "HEAD" ? null : await resolveDownloadSession(req, env, token, row.file_id);
+  if (row.max_downloads && row.download_count >= row.max_downloads && !downloadSession?.existing) return errorPage(req, 410, { zh: "下载次数已达上限", en: "Download Limit Reached" },
     { zh: `该资源允许下载 ${row.max_downloads} 次，名额已用完。`, en: `Download limit (${row.max_downloads}) reached.` });
 
-  if (row.max_downloads && req.method !== "HEAD") {
+  if (row.max_downloads && downloadSession && !downloadSession.existing) {
     const r = await env.db.prepare(
       `UPDATE shares SET download_count = download_count + 1 WHERE id = ?1 AND download_count < ?2`
     ).bind(token, row.max_downloads).run();
@@ -417,7 +439,7 @@ export async function handleDownload(
   {
     const whitelisted = isAdminWhitelisted(ip, settings.adminIps);
     const usingCode = !!codeRow;
-    if (!whitelisted && !usingCode && settings.maxDownloadsPerIp > 0) {
+    if (!whitelisted && !usingCode && settings.maxDownloadsPerIp > 0 && !downloadSession?.existing) {
       const since = settings.countWindowHours > 0 ? Date.now() - settings.countWindowHours * 3600_000 : 0;
       const { c } = (await env.db.prepare(
         "SELECT COUNT(*) AS c FROM download_logs WHERE share_id = ?1 AND ip = ?2 AND created_at > ?3"
@@ -438,7 +460,7 @@ export async function handleDownload(
     }
   }
 
-  return streamFile(req, env, ctx, row, token, "share");
+  return streamFile(req, env, ctx, row, token, "share", downloadSession);
 }
 
 /**
@@ -494,10 +516,11 @@ export async function handleDirectDownload(
     { zh: "该直链已被撤销。", en: "Direct link revoked." });
   if (row.expires_at && row.expires_at < Date.now()) return errorPage(req, 410, { zh: "直链已过期", en: "Link Expired" },
     { zh: "该直链已超过有效期。", en: "Direct link expired." });
-  if (row.max_downloads && row.download_count >= row.max_downloads) return errorPage(req, 410, { zh: "下载次数已达上限", en: "Download Limit Reached" },
+  const downloadSession = req.method === "HEAD" ? null : await resolveDownloadSession(req, env, token, row.file_id);
+  if (row.max_downloads && row.download_count >= row.max_downloads && !downloadSession?.existing) return errorPage(req, 410, { zh: "下载次数已达上限", en: "Download Limit Reached" },
     { zh: `名额已用完。`, en: `Quota used up.` });
 
-  if (row.max_downloads && req.method !== "HEAD") {
+  if (row.max_downloads && downloadSession && !downloadSession.existing) {
     const r = await env.db.prepare(
       `UPDATE direct_links SET download_count = download_count + 1 WHERE id = ?1 AND download_count < ?2`
     ).bind(token, row.max_downloads).run();
@@ -519,7 +542,7 @@ export async function handleDirectDownload(
   {
     const whitelisted = isAdminWhitelisted(ip, settings.adminIps);
     const usingCode = !!codeRow;
-    if (!whitelisted && !usingCode && settings.maxDownloadsPerIp > 0) {
+    if (!whitelisted && !usingCode && settings.maxDownloadsPerIp > 0 && !downloadSession?.existing) {
       const since = settings.countWindowHours > 0 ? Date.now() - settings.countWindowHours * 3600_000 : 0;
       const { c } = (await env.db.prepare(
         "SELECT COUNT(*) AS c FROM download_logs WHERE share_id = ?1 AND ip = ?2 AND created_at > ?3"
@@ -539,7 +562,7 @@ export async function handleDirectDownload(
     }
   }
 
-  return streamFile(req, env, ctx, row, token, "direct");
+  return streamFile(req, env, ctx, row, token, "direct", downloadSession);
 }
 
 /* ════════════════════════════════════════════════════════════════════
@@ -562,7 +585,8 @@ export async function streamFile(
   ctx: ExecutionContext,
   row: StreamFileRow,
   token: string,
-  kind: "share" | "direct"
+  kind: "share" | "direct",
+  downloadSession?: DownloadSession | null
 ): Promise<Response> {
   const ip = clientIp(req);
   const ua = req.headers.get("user-agent") ?? "";
@@ -611,13 +635,21 @@ export async function streamFile(
 
   if (req.method === "HEAD") return new Response(null, { status: range ? 206 : 200, headers });
 
-  // 后台记录
   const bytes = servedLen;
   const codeId = codeRow ? codeRow.code : null;
+  const session = downloadSession ?? await resolveDownloadSession(req, env, token, row.file_id);
+  const { browser, os } = parseUA(ua);
+  const now = Date.now();
+  await env.db.prepare(
+    `INSERT INTO download_logs(share_id, file_id, file_name, ip, ua, browser, os, country, bytes, created_at,
+       activation_code, session_group, session_key, last_seen)
+     VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+     ON CONFLICT(session_key) DO UPDATE SET bytes = download_logs.bytes + excluded.bytes,
+       last_seen = excluded.last_seen`
+  ).bind(token, row.file_id, row.name, ip, ua.slice(0, 500), browser, os, country,
+    bytes, now, codeId, session.group, session.key, now).run();
   ctx.waitUntil(
     (async () => {
-      const { browser, os } = parseUA(ua);
-
       if (env.analytics) {
         try {
           const latitude = req.headers.get("cf-ip-latitude") ?? "";
@@ -634,13 +666,6 @@ export async function streamFile(
         } catch { /* ignore */ }
       }
 
-      await env.db.prepare(
-        `INSERT INTO download_logs(share_id, file_id, file_name, ip, ua, browser, os, country, bytes, created_at, activation_code)
-         VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)`
-      )
-        // 直链也记 download_logs —— share_id 字段存 direct link token 方便追踪
-        .bind(token, row.file_id, row.name, ip, ua.slice(0, 500), browser, os, country, bytes, Date.now(), codeId)
-        .run();
       await addTraffic(env, bytes);
       if (codeRow) {
         const dr = await deductQuota(env, codeRow, bytes);

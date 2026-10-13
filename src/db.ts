@@ -94,10 +94,15 @@ const SCHEMA_STATEMENTS: string[] = [
     os TEXT,
     country TEXT,
     bytes INTEGER NOT NULL DEFAULT 0,
-    created_at INTEGER NOT NULL
+    created_at INTEGER NOT NULL,
+    session_group TEXT,
+    session_key TEXT,
+    last_seen INTEGER
   )`,
   `CREATE INDEX IF NOT EXISTS idx_logs_share_ip ON download_logs(share_id, ip, created_at)`,
   `CREATE INDEX IF NOT EXISTS idx_logs_created ON download_logs(created_at)`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS idx_logs_session_key ON download_logs(session_key)`,
+  `CREATE INDEX IF NOT EXISTS idx_logs_session_group ON download_logs(session_group, last_seen)`,
   `CREATE TABLE IF NOT EXISTS login_logs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     action TEXT NOT NULL,
@@ -239,6 +244,11 @@ const MIGRATION_STATEMENTS: string[] = [
   "CREATE INDEX IF NOT EXISTS idx_files_path ON files(path)",
   "ALTER TABLE upload_sessions ADD COLUMN path TEXT NOT NULL DEFAULT '/'",
   "ALTER TABLE folder_shares ADD COLUMN note TEXT",
+  "ALTER TABLE download_logs ADD COLUMN session_group TEXT",
+  "ALTER TABLE download_logs ADD COLUMN session_key TEXT",
+  "ALTER TABLE download_logs ADD COLUMN last_seen INTEGER",
+  "CREATE UNIQUE INDEX IF NOT EXISTS idx_logs_session_key ON download_logs(session_key)",
+  "CREATE INDEX IF NOT EXISTS idx_logs_session_group ON download_logs(session_group, last_seen)",
 ];
 
 /**
@@ -352,6 +362,9 @@ const EXPECTED_COLUMNS: { table: string; column: string }[] = [
   { table: "shares", column: "market_title" },
   { table: "shares", column: "market_desc" },
   { table: "download_logs", column: "activation_code" },
+  { table: "download_logs", column: "session_group" },
+  { table: "download_logs", column: "session_key" },
+  { table: "download_logs", column: "last_seen" },
   { table: "files", column: "path" },
   { table: "upload_sessions", column: "path" },
   { table: "folder_shares", column: "note" },
@@ -362,6 +375,8 @@ const EXPECTED_INDEXES: string[] = [
   "idx_shares_market",
   "idx_files_path",
   "idx_folder_shares_path",
+  "idx_logs_session_key",
+  "idx_logs_session_group",
 ];
 
 export interface SchemaStatus {

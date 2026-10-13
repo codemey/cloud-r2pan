@@ -165,6 +165,7 @@
     function fileUrl(file) {
       const url=new URL(`${base}/file/${file.id}`,location.origin);
       url.searchParams.set('t',ticket);
+      url.searchParams.set('dl',crypto.randomUUID());
       return url.href;
     }
     function trigger(file) {
