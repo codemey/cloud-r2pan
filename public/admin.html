@@ -1840,11 +1840,38 @@ async function loadOverview(){
 
 /* ═══════════ 文件 ═══════════ */
 let _fileDir = '/';
+const uploadList = document.createElement('div');
+uploadList.id = 'upload-list';
+const activeUploadSessions = new Set();
+const activeUploadIdentities = new Set();
+const uploadIdentity = (name, size, path) => JSON.stringify([name, size, path]);
+let filesLoadVersion = 0;
+function forgetUploadSession(id){
+  try {
+    for(let i=localStorage.length-1;i>=0;i--){
+      const key=localStorage.key(i);
+      if(key?.startsWith('r2pan:upload:') && localStorage.getItem(key)===id) localStorage.removeItem(key);
+    }
+  } catch {}
+}
 const folderParent = path => path.slice(0, path.lastIndexOf('/')) || '/';
 async function loadFiles(){
-  const [{ files: allFiles }, { folders }, { sessions: pendingUploads }] = await Promise.all([
+  const version = ++filesLoadVersion;
+  const [{ files: allFiles }, { folders }, { sessions }] = await Promise.all([
     api('/api/admin/files'), api('/api/admin/folders'), api('/api/admin/upload/multipart')
   ]);
+  if(version !== filesLoadVersion || currentTab !== 'files') return;
+  const superseded = sessions.filter(s => !activeUploadSessions.has(s.id) &&
+    allFiles.some(f => f.name === s.name && f.size === s.size &&
+      f.path === (s.path === '/' ? `/${s.name}` : `${s.path}/${s.name}`) && f.uploaded_at > s.created_at)).slice(0, 10);
+  const cleaned = await Promise.allSettled(superseded.map(async s => {
+    await api(`/api/admin/upload/multipart/${s.id}`, { method:'DELETE' });
+    forgetUploadSession(s.id);
+    return s.id;
+  }));
+  const cleanedIds = new Set(cleaned.filter(r => r.status === 'fulfilled').map(r => r.value));
+  const pendingUploads = sessions.filter(s => !cleanedIds.has(s.id));
+  if(version !== filesLoadVersion || currentTab !== 'files') return;
   if(_fileDir !== '/' && !folders.includes(_fileDir)) _fileDir = '/';
   const files = allFiles.filter(f => folderParent(f.path || `/${f.name}`) === _fileDir);
   const children = folders.filter(path => folderParent(path) === _fileDir);
@@ -1870,15 +1897,19 @@ async function loadFiles(){
     ${pendingUploads.length ? `<div class="glass section">
       <div class="section-title"><h2>${LANG === 'zh' ? '未完成上传' : 'Incomplete uploads'}（${pendingUploads.length}）</h2></div>
       <div style="overflow-x:auto"><table class="tbl"><thead><tr>
-        <th>${esc(t('colName'))}</th><th>R2 Key</th><th>${esc(t('colSize'))}</th>
+        <th>${esc(t('colName'))}</th><th>${LANG === 'zh' ? '上传目录' : 'Folder'}</th><th>R2 Key</th><th>${esc(t('colSize'))}</th>
         <th>${LANG === 'zh' ? '已上传分段' : 'Uploaded parts'}</th><th>${esc(t('colTime'))}</th><th>${esc(t('colActions'))}</th>
       </tr></thead><tbody>${pendingUploads.map(s => `<tr>
         <td class="name-cell">${esc(s.name)}</td>
+        <td>${esc(s.path)}</td>
         <td class="mono" style="overflow-wrap:anywhere">${esc(s.key)}</td>
         <td class="num">${fmtSize(s.size)}</td>
         <td class="num">${s.uploaded_parts} / ${s.part_count}${s.expires_at < Date.now() ? ` · ${LANG === 'zh' ? '已过期' : 'Expired'}` : ''}</td>
         <td class="num">${fmtTime(s.created_at)}</td>
-        <td><button class="btn sm danger" data-abort-upload="${esc(s.id)}" data-upload-key="${esc(s.key)}">${LANG === 'zh' ? '放弃并清理' : 'Discard upload'}</button></td>
+        <td><div class="actions-cell">${activeUploadSessions.has(s.id) ?
+          `<span>${LANG === 'zh' ? '上传中' : 'Uploading'}</span>` :
+          `${s.expires_at >= Date.now() ? `<button class="btn sm primary" data-resume-upload="${esc(s.id)}">${LANG === 'zh' ? '继续上传' : 'Resume upload'}</button>` : ''}
+          <button class="btn sm danger" data-abort-upload="${esc(s.id)}" data-upload-key="${esc(s.key)}">${LANG === 'zh' ? '放弃并清理' : 'Discard upload'}</button>`}</div></td>
       </tr>`).join('')}</tbody></table></div>
     </div>` : ''}
     <div class="glass section">
@@ -1909,6 +1940,7 @@ async function loadFiles(){
         </tbody>
       </table></div>` : `<div class="empty"><div class="icon">📭</div>${esc(t('noFiles'))}</div>`}
     </div>`;
+  $('#upload-list').replaceWith(uploadList);
 
   const dz = $('#dropzone'), fi = $('#file-input');
   dz.onclick = () => fi.click();
@@ -1917,6 +1949,35 @@ async function loadFiles(){
   dz.ondrop = e => { e.preventDefault(); dz.classList.remove('over'); uploadFiles([...e.dataTransfer.files]); };
   fi.onchange = () => { uploadFiles([...fi.files]); fi.value = ''; };
 
+  $$('[data-resume-upload]').forEach(b => b.onclick = () => {
+    const session = pendingUploads.find(s => s.id === b.dataset.resumeUpload);
+    if(!session) return;
+    if(session.expires_at < Date.now()){
+      toast(LANG === 'zh' ? '上传任务已过期，请重新上传' : 'Upload expired; start again', 'err');
+      return;
+    }
+    if(activeUploadIdentities.has(uploadIdentity(session.name, session.size, session.path))){
+      toast(LANG === 'zh' ? '同一文件正在上传，请等待完成' : 'This file is already uploading', 'err');
+      return;
+    }
+    const picker = document.createElement('input');
+    picker.type = 'file';
+    picker.hidden = true;
+    document.body.appendChild(picker);
+    picker.onchange = () => {
+      const file = picker.files?.[0];
+      picker.remove();
+      if(!file) return;
+      if(file.name !== session.name || file.size !== session.size){
+        toast(LANG === 'zh' ? '请选择原文件：文件名和大小必须一致' : 'Select the original file with the same name and size', 'err');
+        return;
+      }
+      uploadFiles([file], { targetPath:session.path, sessionId:session.id });
+    };
+    picker.oncancel = () => picker.remove();
+    picker.click();
+  });
+
   $$('[data-abort-upload]').forEach(b => b.onclick = async () => {
     const key = b.dataset.uploadKey;
     if(!(await confirmDialog(LANG === 'zh' ? '放弃未完成上传' : 'Discard incomplete upload',
@@ -1924,11 +1985,7 @@ async function loadFiles(){
         `Abort ${key} and remove its uploaded parts? Completed files are not deleted.`, true))) return;
     try {
       await api(`/api/admin/upload/multipart/${b.dataset.abortUpload}`, { method:'DELETE' });
-      for(let i=localStorage.length-1;i>=0;i--){
-        const storageKey=localStorage.key(i);
-        if(storageKey?.startsWith('r2pan:upload:') && localStorage.getItem(storageKey)===b.dataset.abortUpload)
-          localStorage.removeItem(storageKey);
-      }
+      forgetUploadSession(b.dataset.abortUpload);
       toast(LANG === 'zh' ? '未完成上传已清理' : 'Incomplete upload removed');
       loadFiles();
     } catch(e) { toast(e.message, 'err'); }
@@ -2038,26 +2095,34 @@ function uploadProgress(item, loaded, total, state, seed=false){
   renderUploadSpeed(item, state);
 }
 
-async function uploadLargeFile(file, item, state, targetPath){
+async function uploadLargeFile(file, item, state, targetPath, preferredSessionId){
   const key = 'r2pan:upload:' + JSON.stringify([file.name, file.size, file.lastModified, targetPath]);
-  let sessionId = null;
-  try { sessionId = localStorage.getItem(key); } catch {}
+  let sessionId = preferredSessionId || null;
+  if(!sessionId) try { sessionId = localStorage.getItem(key); } catch {}
   let session = null;
   if(sessionId){
     try {
       session = await api(`/api/admin/upload/multipart/${sessionId}`);
-      if(session.size !== file.size || session.path !== targetPath) session = null;
-    } catch { session = null; }
+      if(session.name !== file.name || session.size !== file.size || session.path !== targetPath)
+        session = null;
+    } catch(e) {
+      if(preferredSessionId) throw e;
+      session = null;
+    }
+    if(!session && preferredSessionId)
+      throw new Error(LANG === 'zh' ? '文件与未完成上传任务不匹配' : 'File does not match the upload session');
   }
   if(!session){
     session = await api('/api/admin/upload/multipart', {
       method:'POST', body:JSON.stringify({ name:file.name, size:file.size, mime:file.type || 'application/octet-stream', path:targetPath })
     });
     sessionId = session.sessionId;
-    try { localStorage.setItem(key, sessionId); } catch {}
   }
+  try { localStorage.setItem(key, sessionId); } catch {}
   state.sessionId = sessionId;
   state.storageKey = key;
+  activeUploadSessions.add(sessionId);
+  if(currentTab === 'files') loadFiles().catch(e => toast(e.message, 'err'));
   if(state.cancelled){ await cancelMultipartUpload(state); return; }
   if(!session.fileId){
     const done = new Set(session.uploadedParts || []);
@@ -2107,22 +2172,25 @@ async function cancelMultipartUpload(state){
   }
 }
 
-let activeUploadCount = 0;
-let refreshFilesAfterUpload = false;
-function uploadFiles(files){
-  const targetPath = $('#upload-target')?.value || _fileDir;
+function uploadFiles(files, options={}){
+  const targetPath = options.targetPath || $('#upload-target')?.value || _fileDir;
   for(const file of files){
     if(file.size > MULTIPART_UPLOAD_MAX){ toast(t('tooLarge', {name:file.name}), 'err'); continue; }
+    const identity = uploadIdentity(file.name, file.size, targetPath);
+    if(activeUploadIdentities.has(identity)){
+      toast(LANG === 'zh' ? '同一文件正在上传，请等待完成' : 'This file is already uploading', 'err');
+      continue;
+    }
+    activeUploadIdentities.add(identity);
     const item = document.createElement('div');
     item.className = 'upload-item glass';
     item.innerHTML = `${ficon(file.name)}<span class="upload-name" style="min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(file.name)}</span>
       <div class="prog"><i></i></div><span class="pct">0%</span><span class="speed" title="${LANG === 'zh' ? '上传速度' : 'Upload speed'}">0 KB/s</span>
       <button class="btn sm" type="button" title="${esc(t('cancelUpload'))}" aria-label="${esc(t('cancelUpload'))}">×</button>`;
-    $('#upload-list').prepend(item);
+    uploadList.prepend(item);
     const state = { cancelled:false, xhr:null, sessionId:null, storageKey:null, abortRequested:false,
       transferredBytes:0, lastLoaded:0, speedSamples:[{ time:performance.now(), bytes:0 }] };
     state.speedTimer = setInterval(() => renderUploadSpeed(item, state), 500);
-    activeUploadCount++;
     const cancel = item.querySelector('button');
     cancel.onclick = async () => {
       state.cancelled = true;
@@ -2131,9 +2199,10 @@ function uploadFiles(files){
       item.querySelector('.pct').textContent = t('uploadCancelled');
       item.querySelector('.speed').textContent = '';
       cancel.remove();
+      setTimeout(() => item.remove(), 8000);
     };
     const promise = file.size > DIRECT_UPLOAD_MAX
-      ? uploadLargeFile(file, item, state, targetPath)
+      ? uploadLargeFile(file, item, state, targetPath, options.sessionId)
       : uploadRequest('POST', '/api/admin/upload', file, state,
           loaded => uploadProgress(item, loaded, file.size, state),
           { 'X-File-Name':encodeURIComponent(file.name), 'X-Folder-Path':targetPath,
@@ -2145,20 +2214,19 @@ function uploadFiles(files){
       item.querySelector('.speed').textContent = '';
       cancel.remove();
       toast(t('uploadOk', {name:file.name}));
-      refreshFilesAfterUpload = true;
+      setTimeout(() => item.remove(), 8000);
     }).catch(e => {
       if(state.cancelled) return;
       item.querySelector('.pct').textContent = t('uploadFailShort');
       item.querySelector('.speed').textContent = '';
       cancel.remove();
       toast(`${t('uploadFail', {name:file.name})}: ${e.message}`, 'err');
+      setTimeout(() => item.remove(), 15000);
     }).finally(() => {
       clearInterval(state.speedTimer);
-      activeUploadCount--;
-      if(activeUploadCount === 0 && refreshFilesAfterUpload){
-        refreshFilesAfterUpload = false;
-        loadFiles();
-      }
+      activeUploadIdentities.delete(identity);
+      if(state.sessionId) activeUploadSessions.delete(state.sessionId);
+      if(currentTab === 'files') loadFiles().catch(e => toast(e.message, 'err'));
     });
   }
 }

@@ -29,7 +29,6 @@
     button.small { padding:6px 11px; font-size:13px; white-space:nowrap; }
     .toolbar { display:flex; align-items:center; gap:10px; flex-wrap:wrap; padding:0 0 18px; border-bottom:1px solid #e2e8f0; }
     .toolbar .spacer { flex:1; }
-    .selected-directory { color:#64748b; font-size:13px; overflow-wrap:anywhere; }
     input { width:min(300px, 100%); background:#fff; color:#1f2937; border:1px solid #cbd5e1; border-radius:6px; padding:10px 12px; font:inherit; }
     input:focus { outline:2px solid #0f8776; outline-offset:2px; }
     .notice { color:#8a5a14; font-size:13px; padding-top:12px; }
@@ -72,9 +71,6 @@
         all:'下载全部', stop:'停止后续下载', file:'文件', sizeCol:'大小', action:'操作', download:'下载', empty:'此文件夹暂无文件',
         unsupported:'大文件已交由浏览器下载列表，请在那里查看实际进度。',
         destination:'文件会分别保存到浏览器默认下载目录。子目录路径会写入文件名。浏览器可能要求允许多个文件下载。',
-        chooseDirectory:'选择保存目录', noDirectory:'请先选择保存目录', selectedDirectory:'已选择：{name}',
-        saving:'已保存 {files} / {count} 个文件 · {done} / {total}', saved:'已保存到 {name}',
-        saveFailed:'保存中断；已完成的文件保留在 {name} 文件夹。{error}', nameConflict:'文件名在当前设备上发生冲突，无法安全保存',
         preparing:'正在准备下载…', progress:'已处理 {files} / {count} 个文件 · 已读取 {done} / {total}', finished:'下载队列已完成',
         stopped:'已停止后续下载', failed:'下载失败，请重试当前文件', badPassword:'密码错误', auth:'验证失败', oauth:'请先完成站点登录',
         turnstile:'请完成人机验证', login:'使用 {provider} 登录', retry:'重试' },
@@ -90,9 +86,8 @@
     const t = (key, values={}) => (messages[lang][key] || key).replace(/\{(\w+)\}/g, (_, k) => values[k] ?? '');
     const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
     const fmtSize = bytes => bytes < 1024 ? `${bytes} B` : bytes < 1024 ** 2 ? `${(bytes / 1024).toFixed(1)} KB` : bytes < 1024 ** 3 ? `${(bytes / 1024 ** 2).toFixed(1)} MB` : `${(bytes / 1024 ** 3).toFixed(2)} GB`;
-    let info, manifest, ticket, oauthProviders=[], running=false, stopAfterCurrent=false, selectedDirectory=null;
+    let info, manifest, ticket, oauthProviders=[], running=false, stopAfterCurrent=false;
     const IN_PAGE_MAX = 32 * 1024 * 1024;
-    const directoryPickerAvailable = typeof window.showDirectoryPicker === 'function';
     $('brand').textContent=t('brand');
     $('title').textContent=t('loading');
     const notice = (text, error=false) => { $('notice').textContent=text; $('notice').className=error?'notice error':'notice'; };
@@ -122,7 +117,7 @@
         <button class="primary" type="button" id="view-files">${esc(info.needs_password?t('open'):t('access'))}</button>`;
       $('view-files').onclick=unlock;
       $('password')?.addEventListener('keydown',e=>{if(e.key==='Enter')unlock();});
-      notice(directoryPickerAvailable?'':t('destination'));
+      notice(t('destination'));
       if (info.turnstile?.needs_now && info.turnstile.sitekey) {
         const wrap=document.createElement('div'); wrap.id='turnstile'; $('toolbar').prepend(wrap);
         const script=document.createElement('script'); script.src='https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit';
@@ -146,27 +141,17 @@
       manifest=await api(`${base}/manifest?t=${encodeURIComponent(ticket)}`);
       const total=manifest.files.reduce((sum,file)=>sum+file.size,0);
       $('stats').textContent=`${t('count',{n:manifest.files.length})} · ${t('size',{n:fmtSize(total)})}`;
-      $('toolbar').innerHTML=`${directoryPickerAvailable?`<button type="button" id="choose-directory">${esc(t('chooseDirectory'))}</button>
-        <span class="selected-directory" id="selected-directory">${esc(selectedDirectory?t('selectedDirectory',{name:selectedDirectory.name}):t('noDirectory'))}</span>`:''}
-        <button class="primary" type="button" id="download-all" ${(manifest.files.length || manifest.directories.length) && (!directoryPickerAvailable || selectedDirectory)?'':'disabled'}>${esc(t('all'))}</button>
+      $('toolbar').innerHTML=`<button class="primary" type="button" id="download-all" ${manifest.files.length?'':'disabled'}>${esc(t('all'))}</button>
         <button type="button" id="stop" hidden>${esc(t('stop'))}</button><span class="spacer"></span>`;
       $('download-all').onclick=downloadAll;
       $('stop').onclick=()=>{stopAfterCurrent=true;};
-      if(directoryPickerAvailable) $('choose-directory').onclick=async()=>{
-        try {
-          selectedDirectory=await window.showDirectoryPicker({mode:'readwrite',startIn:'downloads'});
-          $('selected-directory').textContent=t('selectedDirectory',{name:selectedDirectory.name});
-          $('download-all').disabled=!(manifest.files.length || manifest.directories.length);
-          notice('');
-        } catch(error) { if(error.name!=='AbortError') notice(error.message || t('noDirectory'),true); }
-      };
       const dirs=manifest.directories.map(path=>`<tr><td class="path"><span class="file-icon dir-icon">▸</span>${esc(path)}/</td><td></td><td></td></tr>`).join('');
       const files=manifest.files.map((file,index)=>`<tr><td class="path"><span class="file-icon">▣</span>${esc(file.path)}</td>
         <td class="muted">${fmtSize(file.size)}</td><td><button class="small" type="button" data-file="${index}">${esc(t('download'))}</button></td></tr>`).join('');
       $('contents').innerHTML=files||dirs?`<table class="table"><thead><tr><th>${esc(t('file'))}</th><th>${esc(t('sizeCol'))}</th><th>${esc(t('action'))}</th></tr></thead><tbody>${dirs}${files}</tbody></table>`
         :`<div class="empty">${esc(t('empty'))}</div>`;
       document.querySelectorAll('[data-file]').forEach(button=>button.onclick=()=>downloadOne(manifest.files[Number(button.dataset.file)]));
-      notice(directoryPickerAvailable?'':t('destination'));
+      notice(t('destination'));
     }
     function fileUrl(file) {
       const url=new URL(`${base}/file/${file.id}`,location.origin);
@@ -200,94 +185,10 @@
       setTimeout(()=>URL.revokeObjectURL(blobUrl),60_000);
       return true;
     }
-    function showProgress(done,total,files,count,label='progress') {
+    function showProgress(done,total,files,count) {
       $('progress').hidden=false;
-      $('progress-text').textContent=t(label,{done:fmtSize(done),total:fmtSize(total),files,count});
+      $('progress-text').textContent=t('progress',{done:fmtSize(done),total:fmtSize(total),files,count});
       $('progress-fill').style.width=`${total?Math.min(100,done/total*100):100}%`;
-    }
-    function safeLocalName(value) {
-      let name=Array.from(String(value || '')).slice(0,180).join('')
-        .replace(/[<>:"/\\|?*\u0000-\u001f]/g,'_').replace(/[. ]+$/,'').trim();
-      if(/^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\..*)?$/i.test(name)) name=`_${name}`;
-      return name || '未命名';
-    }
-    async function createDownloadRoot(parent, name) {
-      const baseName=safeLocalName(name);
-      for(let number=0;number<1000;number++) {
-        const candidate=number?`${baseName} (${number})`:baseName;
-        try { await parent.getDirectoryHandle(candidate); }
-        catch(error) {
-          if(error.name==='TypeMismatchError') continue;
-          if(error.name==='NotFoundError') return {handle:await parent.getDirectoryHandle(candidate,{create:true}),name:candidate};
-          throw error;
-        }
-      }
-      throw new Error(t('nameConflict'));
-    }
-    async function downloadAllToDirectory() {
-      if(running || !selectedDirectory) return;
-      const files=manifest.files.map(file=>({file,parts:file.path.split('/').map(safeLocalName)}));
-      const names=new Set();
-      for(const {parts} of files) {
-        const name=parts.join('/').toLocaleLowerCase();
-        if(names.has(name)) { notice(t('nameConflict'),true); return; }
-        names.add(name);
-      }
-      if(manifest.directories.some(path=>names.has(path.split('/').map(safeLocalName).join('/').toLocaleLowerCase()))) {
-        notice(t('nameConflict'),true); return;
-      }
-      running=true; stopAfterCurrent=false;
-      $('download-all').disabled=true; $('choose-directory').disabled=true; $('stop').hidden=false;
-      const total=manifest.files.reduce((sum,file)=>sum+file.size,0);
-      let done=0, completed=0, rootName='';
-      notice('');
-      try {
-        const root=await createDownloadRoot(selectedDirectory,manifest.name || info.name);
-        rootName=root.name;
-        for(const path of manifest.directories) {
-          let dir=root.handle;
-          for(const part of path.split('/').map(safeLocalName)) dir=await dir.getDirectoryHandle(part,{create:true});
-        }
-        showProgress(0,total,0,files.length,'saving');
-        for(const {file,parts} of files) {
-          if(stopAfterCurrent) break;
-          let dir=root.handle;
-          for(const part of parts.slice(0,-1)) dir=await dir.getDirectoryHandle(part,{create:true});
-          const name=parts.at(-1);
-          const response=await fetch(fileUrl(file),{cache:'no-store'});
-          if(!response.ok || !response.body) throw new Error(t('failed'));
-          const reader=response.body.getReader();
-          let writable, fileCreated=false;
-          let loaded=0;
-          try {
-            const fileHandle=await dir.getFileHandle(name,{create:true});
-            fileCreated=true;
-            writable=await fileHandle.createWritable();
-            for(;;) {
-              const {done:finished,value}=await reader.read();
-              if(finished) break;
-              loaded+=value.byteLength;
-              if(loaded>file.size) throw new Error(t('failed'));
-              await writable.write(value);
-              showProgress(done+loaded,total,completed,files.length,'saving');
-            }
-            if(loaded!==file.size) throw new Error(t('failed'));
-            await writable.close();
-          } catch(error) {
-            await reader.cancel().catch(()=>{});
-            await writable?.abort().catch(()=>{});
-            if(fileCreated) await dir.removeEntry(name).catch(()=>{});
-            throw error;
-          }
-          done+=file.size; completed++;
-          showProgress(done,total,completed,files.length,'saving');
-        }
-        notice(stopAfterCurrent?t('stopped'):t('saved',{name:rootName}));
-      } catch(error) {
-        notice(rootName?t('saveFailed',{name:rootName,error:error.message || t('failed')}):error.message || t('failed'),true);
-      } finally {
-        running=false; $('download-all').disabled=false; $('choose-directory').disabled=false; $('stop').hidden=true;
-      }
     }
     async function downloadOne(file) {
       if (running) return;
@@ -301,7 +202,6 @@
       finally {running=false;}
     }
     async function downloadAll() {
-      if(directoryPickerAvailable) return downloadAllToDirectory();
       if (running) return;
       running=true; stopAfterCurrent=false;
       $('download-all').disabled=true; $('stop').hidden=false;
