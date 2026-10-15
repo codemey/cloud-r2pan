@@ -261,7 +261,7 @@ async function route(req: Request, env: Env, ctx: ExecutionContext): Promise<Res
     return notFound(req);
   }
 
-  const folderMatch = /^\/f\/([A-Za-z0-9]+)(?:\/(info|verify|manifest|file\/([A-Za-z0-9]+)))?\/?$/.exec(path);
+  const folderMatch = /^\/f\/([A-Za-z0-9]+)(?:\/(info|verify|manifest|file\/([A-Za-z0-9]+)(?:\/[^/]+)?))?\/?$/.exec(path);
   if (folderMatch) {
     await ensureSchema(env);
     if (!folderMatch[2]) {

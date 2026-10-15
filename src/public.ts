@@ -624,7 +624,8 @@ export async function streamFile(
   headers.set("accept-ranges", "bytes");
   headers.set("cache-control", "no-store");
   const displayName = row.download_name || row.name;
-  headers.set("content-disposition", `attachment; filename*=UTF-8''${encodeURIComponent(displayName)}`);
+  const fallbackName = displayName.replace(/[^A-Za-z0-9 ._()-]/g, "_") || "download";
+  headers.set("content-disposition", `attachment; filename="${fallbackName}"; filename*=UTF-8''${encodeURIComponent(displayName)}`);
   const { addSecurityHeaders } = await import("./pages");
   addSecurityHeaders(headers, { isDownload: true });
   const servedLen = range ? range.length : row.size;

@@ -167,7 +167,8 @@
       notice(t('destination'));
     }
     function fileUrl(file) {
-      const url=new URL(`${base}/file/${file.id}`,location.origin);
+      const name=file.path.replaceAll('/','__');
+      const url=new URL(`${base}/file/${file.id}/${encodeURIComponent(name)}`,location.origin);
       url.searchParams.set('t',ticket);
       url.searchParams.set('dl',crypto.randomUUID());
       return url.href;

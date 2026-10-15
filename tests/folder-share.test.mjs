@@ -101,11 +101,21 @@ test('nested folder upload and protected share preserve paths and file streaming
     assert.equal((await (await fetch(`${share}/manifest?t=${encodeURIComponent(ticket)}`)).json()).note, null);
 
     const fileUrl = `${share}/file/${fileId}?t=${encodeURIComponent(ticket)}`;
+    const namedFileUrl = `${share}/file/${fileId}/nested__hello.txt?t=${encodeURIComponent(ticket)}`;
     const range = await fetch(fileUrl, { headers: { range: 'bytes=0-5' } });
     assert.equal(range.status, 206);
     assert.equal(range.headers.get('content-range'), 'bytes 0-5/15');
     assert.equal(await range.text(), 'folder');
-    const full = await fetch(fileUrl);
+    const head = await fetch(namedFileUrl, { method: 'HEAD' });
+    assert.equal(head.status, 200);
+    assert.equal(head.headers.get('content-length'), '15');
+    assert.equal(head.headers.get('content-disposition'),
+      'attachment; filename="nested__hello.txt"; filename*=UTF-8\'\'nested__hello.txt');
+    const namedRange = await fetch(namedFileUrl, { headers: { range: 'bytes=7-14' } });
+    assert.equal(namedRange.status, 206);
+    assert.equal(namedRange.headers.get('content-range'), 'bytes 7-14/15');
+    assert.equal(await namedRange.text(), 'contents');
+    const full = await fetch(namedFileUrl);
     assert.equal(full.status, 200);
     assert.match(full.headers.get('content-disposition'), /nested__hello\.txt/);
     assert.equal(await full.text(), 'folder contents');
