@@ -15,7 +15,7 @@ import type { Env } from "./types";
 const SCHEMA_STATEMENTS: string[] = [
   `CREATE TABLE IF NOT EXISTS files (
     id TEXT PRIMARY KEY,
-    key TEXT NOT NULL UNIQUE,
+    key TEXT NOT NULL,
     name TEXT NOT NULL,
     size INTEGER NOT NULL,
     mime TEXT NOT NULL DEFAULT 'application/octet-stream',
@@ -251,6 +251,37 @@ const MIGRATION_STATEMENTS: string[] = [
   "CREATE INDEX IF NOT EXISTS idx_logs_session_group ON download_logs(session_group, last_seen)",
 ];
 
+async function migrateSharedFileKeys(env: Env): Promise<void> {
+  const hasUniqueKey = async () => {
+    const indexes = await env.db.prepare("PRAGMA index_list(files)").all<{ name: string; unique: number }>();
+    for (const index of indexes.results) {
+      if (!index.unique) continue;
+      const columns = await env.db.prepare(`PRAGMA index_info("${index.name.replace(/"/g, '""')}")`)
+        .all<{ name: string }>();
+      if (columns.results.length === 1 && columns.results[0].name === "key") return true;
+    }
+    return false;
+  };
+  if (await hasUniqueKey()) {
+    try {
+      await env.db.batch([
+        env.db.prepare(`CREATE TABLE files_shared_key_migration (
+          id TEXT PRIMARY KEY, key TEXT NOT NULL, name TEXT NOT NULL, size INTEGER NOT NULL,
+          mime TEXT NOT NULL DEFAULT 'application/octet-stream', uploaded_at INTEGER NOT NULL,
+          path TEXT NOT NULL DEFAULT '/'
+        )`),
+        env.db.prepare("INSERT INTO files_shared_key_migration(id, key, name, size, mime, uploaded_at, path) SELECT id, key, name, size, mime, uploaded_at, path FROM files"),
+        env.db.prepare("DROP TABLE files"),
+        env.db.prepare("ALTER TABLE files_shared_key_migration RENAME TO files"),
+        env.db.prepare("CREATE INDEX idx_files_path ON files(path)"),
+      ]);
+    } catch (error) {
+      if (await hasUniqueKey()) throw error;
+    }
+  }
+  await env.db.prepare("CREATE INDEX IF NOT EXISTS idx_files_key ON files(key)").run();
+}
+
 /**
  * 幂等迁移：读 settings.migration_version，只跑 index >= version 的迁移语句。
  * 这样每个迁移只执行一次，避免每次请求都白跑 9 条 ALTER。
@@ -338,6 +369,7 @@ export async function ensureSchema(env: Env): Promise<void> {
 
   // ⑤ 跑增量迁移（幂等，只跑未执行过的）
   await runMigrations(env);
+  await migrateSharedFileKeys(env);
 
   schemaReady = true;
 }
@@ -374,6 +406,7 @@ const EXPECTED_COLUMNS: { table: string; column: string }[] = [
 const EXPECTED_INDEXES: string[] = [
   "idx_shares_market",
   "idx_files_path",
+  "idx_files_key",
   "idx_folder_shares_path",
   "idx_logs_session_key",
   "idx_logs_session_group",

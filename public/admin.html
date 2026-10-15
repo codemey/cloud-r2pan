@@ -1844,6 +1844,7 @@ async function loadOverview(){
 
 /* ═══════════ 文件 ═══════════ */
 let _fileDir = '/';
+let _copiedFile = null;
 const uploadList = document.createElement('div');
 uploadList.id = 'upload-list';
 const activeUploadSessions = new Set();
@@ -1908,7 +1909,7 @@ async function loadFiles(){
     </div>` : ''}
     <div class="glass section">
       <div class="section-title" style="gap:12px;flex-wrap:wrap"><h2>📁 ${esc(_fileDir === '/' ? t('allFiles') : _fileDir)}（${files.length + children.length}）</h2>
-        <div class="row" style="gap:8px;flex-wrap:wrap"><button class="btn sm" id="sync-storage">${LANG === 'zh' ? '同步存储' : 'Sync storage'}</button><button class="btn sm" id="new-folder">${LANG === 'zh' ? '新建文件夹' : 'New folder'}</button>
+        <div class="row" style="gap:8px;flex-wrap:wrap"><button class="btn sm" id="sync-storage">${LANG === 'zh' ? '同步存储' : 'Sync storage'}</button><button class="btn sm" id="new-folder">${LANG === 'zh' ? '新建文件夹' : 'New folder'}</button><button class="btn sm" id="paste-file" ${_copiedFile ? `title="${esc(_copiedFile.name)}"` : 'disabled'}>${LANG === 'zh' ? '粘贴文件' : 'Paste file'}</button>
         ${_fileDir !== '/' ? `<button class="btn sm primary" id="share-folder">${LANG === 'zh' ? '分享此文件夹' : 'Share folder'}</button>` : ''}</div></div>
       <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px">${crumbs.map(c=>`<button class="btn sm" data-folder="${esc(c.path)}">${esc(c.name)}</button>`).join('')}</div>
       ${files.length || children.length ? `
@@ -1927,6 +1928,7 @@ async function loadFiles(){
             <td><div class="actions-cell">
               <button class="btn sm primary" data-share="${f.id}">${esc(t('createShare'))}</button>
               <button class="btn sm" data-direct="${f.id}" style="background:rgba(250,204,21,0.15);border-color:rgba(250,204,21,0.35);color:#fde68a">${esc(t('createDirect'))}</button>
+              <button class="btn sm" data-copy-file="${f.id}" data-name="${esc(f.name)}">${LANG === 'zh' ? '复制' : 'Copy'}</button>
               <button class="btn sm" data-move="${f.id}" data-name="${esc(f.name)}">${LANG === 'zh' ? '移动' : 'Move'}</button>
               <button class="btn sm danger" data-del="${f.id}" data-name="${esc(f.name)}">${esc(t('del'))}</button>
             </div></td>
@@ -2039,6 +2041,16 @@ async function loadFiles(){
     finally { button.disabled = false; button.textContent = LANG === 'zh' ? '同步存储' : 'Sync storage'; }
   };
   $('#share-folder')?.addEventListener('click', () => openFolderShareModal(_fileDir));
+  $('#paste-file').onclick = async () => {
+    if(!_copiedFile) return;
+    const button = $('#paste-file');
+    button.disabled = true;
+    try {
+      await api(`/api/admin/files/${_copiedFile.id}/copy`, { method:'POST', body:JSON.stringify({path:_fileDir}) });
+      toast(LANG === 'zh' ? '文件已粘贴，未重复占用存储空间' : 'File pasted without duplicating storage');
+      loadFiles();
+    } catch(e) { toast(e.message, 'err'); button.disabled = false; }
+  };
   $('#new-folder').onclick = () => {
     openModal(`<h3>${LANG === 'zh' ? '新建文件夹' : 'New folder'}</h3>
       <div class="field"><label>${LANG === 'zh' ? '文件夹名称' : 'Folder name'}</label><input id="folder-name" maxlength="180" autocomplete="off"></div>
@@ -2056,6 +2068,11 @@ async function loadFiles(){
 
   $$('[data-share]').forEach(b => b.onclick = () => openShareModal(b.dataset.share));
   $$('[data-direct]').forEach(b => b.onclick = () => openDirectModal(b.dataset.direct));
+  $$('[data-copy-file]').forEach(b => b.onclick = () => {
+    _copiedFile = { id:b.dataset.copyFile, name:b.dataset.name };
+    toast(LANG === 'zh' ? `已复制 ${_copiedFile.name}，进入目标文件夹后粘贴` : `Copied ${_copiedFile.name}; paste in another folder`);
+    loadFiles();
+  });
   $$('[data-move]').forEach(b => b.onclick = () => {
     const options = [`<option value="/">${LANG === 'zh' ? '根目录' : 'Root'}</option>`,
       ...folders.map(path => `<option value="${esc(path)}">${esc(path)}</option>`)].join('');

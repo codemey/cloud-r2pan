@@ -21,6 +21,7 @@ import { getSettings } from "./settings";
 import { sha256Hex, safeEqual, randomHex } from "./crypto";
 import { createStorageProvider, type StorageProvider } from "./storage";
 import { randomId } from "./db";
+import { deleteFileRecord } from "./file-records";
 
 /* ═══════════ 懒加载 StorageProvider ═══════════ */
 let _storagePromise: Promise<StorageProvider> | null = null;
@@ -589,14 +590,8 @@ async function handleWebDavPut(
   // 检查是否已存在同名文件（覆盖）
   const existing = await findFile(env, dir, name);
   if (existing) {
-    // 删除旧文件 + 关联的 shares
     try {
-      await env.db.batch([
-        env.db.prepare("DELETE FROM shares WHERE file_id = ?1").bind(existing.id),
-        env.db.prepare("DELETE FROM download_logs WHERE file_id = ?1").bind(existing.id),
-        env.db.prepare("DELETE FROM files WHERE id = ?1").bind(existing.id),
-      ]);
-      await st.delete(existing.key).catch(() => {});
+      await deleteFileRecord(env, existing.id, st);
     } catch { /* 忽略清理失败 */ }
   }
 
@@ -634,12 +629,7 @@ async function handleWebDavDelete(env: Env, internalPath: string): Promise<Respo
     const file = await findFile(env, dir, name);
     if (file) {
       const st = await storage(env);
-      await env.db.batch([
-        env.db.prepare("DELETE FROM shares WHERE file_id = ?1").bind(file.id),
-        env.db.prepare("DELETE FROM download_logs WHERE file_id = ?1").bind(file.id),
-        env.db.prepare("DELETE FROM files WHERE id = ?1").bind(file.id),
-      ]);
-      await st.delete(file.key).catch(() => {});
+      await deleteFileRecord(env, file.id, st);
       return new Response("", { status: 204 });
     }
   }
@@ -656,12 +646,7 @@ async function handleWebDavDelete(env: Env, internalPath: string): Promise<Respo
       .all<{ id: string; key: string }>();
 
     for (const f of files) {
-      await env.db.batch([
-        env.db.prepare("DELETE FROM shares WHERE file_id = ?1").bind(f.id),
-        env.db.prepare("DELETE FROM download_logs WHERE file_id = ?1").bind(f.id),
-        env.db.prepare("DELETE FROM files WHERE id = ?1").bind(f.id),
-      ]);
-      await st.delete(f.key).catch(() => {});
+      await deleteFileRecord(env, f.id, st);
     }
 
     await env.db.batch([
@@ -798,10 +783,14 @@ async function handleWebDavCopy(
   if (!srcFile) {
     return new Response("Only file copy supported", { status: 501 });
   }
+  if (destPath === internalPath) return new Response("", { status: 204 });
 
   const destParent = destPath.slice(0, destPath.lastIndexOf("/")) || "/";
   if (!(await directoryExists(env, destParent))) {
     return new Response("Conflict", { status: 409 });
+  }
+  if (await directoryExists(env, destPath)) {
+    return new Response("Conflict: destination is a directory", { status: 409 });
   }
 
   const destFile = await pathIsFile(env, destPath);
@@ -812,19 +801,12 @@ async function handleWebDavCopy(
     await handleWebDavDelete(env, destPath);
   }
 
-  const st = await storage(env);
-  const srcObj = await st.get(srcFile.key);
-  if (!srcObj) return new Response("Source not found", { status: 404 });
-
   const newId = randomId(14);
-  const newKey = `files/${newId}`;
   const newName = destPath.split("/").filter(Boolean).pop() || srcFile.name;
-
-  await st.put(newKey, srcObj.body, { contentType: srcFile.mime });
 
   await env.db.prepare(
     "INSERT INTO files(id, key, name, size, mime, path, uploaded_at) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)"
-  ).bind(newId, newKey, newName, srcFile.size, srcFile.mime, destPath, Date.now()).run();
+  ).bind(newId, srcFile.key, newName, srcFile.size, srcFile.mime, destPath, Date.now()).run();
 
   return new Response("", { status: 201 });
 }

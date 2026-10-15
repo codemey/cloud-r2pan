@@ -9,6 +9,7 @@ import { handleFolderAdmin, folderExists, validPath } from "./folders";
 import { parseUA } from "./ua";
 import { encryptSecret, decryptSecret, totpGenerateSecret, totpVerify, totpUri, totpGenerateRecoveryCodes, sha256Hex, safeEqual } from "./crypto";
 import { createStorageProvider, type StorageProvider } from "./storage";
+import { deleteFileRecord } from "./file-records";
 
 /** 懒加载 StorageProvider —— 每次需要时从 settings 构造（settings 有 5s 缓存，成本低） */
 let _storagePromise: Promise<StorageProvider> | null = null;
@@ -608,6 +609,39 @@ export async function handleAdminApi(
     return json({ ok: true, id: session.id, name: session.name, size: session.size }, 201);
   }
 
+  // ── 复制文件：新增目录记录，共用同一存储对象 ──────────
+  const copyFileMatch = /^\/api\/admin\/files\/([^/]+)\/copy$/.exec(path);
+  if (copyFileMatch && method === "POST") {
+    const body = await readJson<{ path: string }>(req);
+    const targetPath = body.path;
+    if (typeof targetPath !== "string" ||
+        (targetPath !== "/" && (!validPath(targetPath) || !(await folderExists(env, targetPath)))))
+      return json({ error: msg(req, "目标文件夹不存在", "Target folder not found") }, 404);
+    const file = await env.db.prepare("SELECT name FROM files WHERE id = ?1")
+      .bind(copyFileMatch[1]).first<{ name: string }>();
+    if (!file) return json({ error: msg(req, "文件不存在", "File not found") }, 404);
+    const destination = targetPath === "/" ? `/${file.name}` : `${targetPath}/${file.name}`;
+    const [sameName, directory] = await Promise.all([
+      env.db.prepare("SELECT 1 FROM files WHERE path = ?1 LIMIT 1").bind(destination).first(),
+      folderExists(env, destination),
+    ]);
+    if (sameName || directory) return json({ error: msg(req, "目标文件夹已有同名文件或文件夹", "A file or folder with this name already exists") }, 409);
+    const id = randomId(14);
+    const result = await env.db.prepare(
+      `INSERT INTO files(id, key, name, size, mime, path, uploaded_at)
+       SELECT ?1, key, name, size, mime, ?2, ?3 FROM files
+       WHERE id = ?4 AND NOT EXISTS (SELECT 1 FROM files WHERE path = ?2)`
+    ).bind(id, destination, Date.now(), copyFileMatch[1]).run();
+    if (!result.meta.changes) {
+      const stillExists = await env.db.prepare("SELECT 1 FROM files WHERE id = ?1")
+        .bind(copyFileMatch[1]).first();
+      return stillExists
+        ? json({ error: msg(req, "目标文件夹已有同名文件或文件夹", "A file or folder with this name already exists") }, 409)
+        : json({ error: msg(req, "文件不存在", "File not found") }, 404);
+    }
+    return json({ ok: true, id, path: destination }, 201);
+  }
+
   // ── 移动文件（保持对象 key 与已有分享不变） ──────────
   const moveFileMatch = /^\/api\/admin\/files\/([^/]+)\/move$/.exec(path);
   if (moveFileMatch && method === "POST") {
@@ -630,15 +664,12 @@ export async function handleAdminApi(
     return json({ ok: true, path: destination });
   }
 
-  // ── 删除文件（连带存储对象、分享、日志） ──────────
+  // ── 删除文件记录；最后一个引用删除时才清理存储对象 ──
   const fileMatch = /^\/api\/admin\/files\/([^/]+)$/.exec(path);
   if (fileMatch && method === "DELETE") {
     const fileId = fileMatch[1];
-    const file = await env.db.prepare("SELECT key FROM files WHERE id = ?1").bind(fileId).first<{ key: string }>();
-    if (!file) return json({ error: msg(req, "文件不存在", "File not found") }, 404);
-    await deleteFileMetadata(env, fileId);
-    const st = await storage(env);
-    ctx.waitUntil(st.delete(file.key).catch(() => {}));
+    if (!(await deleteFileRecord(env, fileId, await storage(env))))
+      return json({ error: msg(req, "文件不存在", "File not found") }, 404);
     return json({ ok: true });
   }
 

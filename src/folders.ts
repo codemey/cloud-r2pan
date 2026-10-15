@@ -6,6 +6,7 @@ import { getSettings } from "./settings";
 import { verifyOAuthSession } from "./oauth";
 import { json } from "./pages";
 import { createStorageProvider } from "./storage";
+import { deleteFileRecord } from "./file-records";
 import {
   hashPassword, verifyPassword, issueToken, verifyShareToken, streamFile,
   isTurnstileEnabled, getTurnstileInfo, verifyTurnstileToken,
@@ -136,16 +137,8 @@ export async function handleFolderAdmin(req: Request, env: Env, path: string): P
     ).bind(lower, upper).all<{ id: string; key: string }>();
     if (files.results.length) {
       const st = await createStorageProvider(env, await getSettings(env));
-      for (const file of files.results) await st.delete(file.key);
-      const ids = files.results.map(file => file.id);
-      const placeholders = ids.map((_, i) => `?${i + 1}`).join(",");
-      await env.db.batch([
-        env.db.prepare(`DELETE FROM shares WHERE file_id IN (${placeholders})`).bind(...ids),
-        env.db.prepare(`DELETE FROM direct_links WHERE file_id IN (${placeholders})`).bind(...ids),
-        env.db.prepare(`DELETE FROM download_logs WHERE file_id IN (${placeholders})`).bind(...ids),
-        env.db.prepare(`DELETE FROM files WHERE id IN (${placeholders})`).bind(...ids),
-      ]);
-      return json({ ok: true, done: false, removed: ids.length });
+      for (const file of files.results) await deleteFileRecord(env, file.id, st);
+      return json({ ok: true, done: false, removed: files.results.length });
     }
     await env.db.batch([
       env.db.prepare("DELETE FROM folder_shares WHERE path = ?1 OR (path >= ?2 AND path < ?3)").bind(folderPath, lower, upper),
