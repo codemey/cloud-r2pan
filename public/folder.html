@@ -42,6 +42,7 @@
     .table td { border-bottom:1px solid #e8eef5; padding:12px 10px; font-size:14px; }
     .table td:first-child { overflow-wrap:anywhere; }
     .table td:last-child, .table th:last-child { text-align:right; }
+    .row-actions { display:inline-flex; align-items:center; justify-content:flex-end; gap:8px; }
     .path { color:#1f2937; }
     .file-icon { color:#0f8776; margin-right:9px; }
     .dir-icon { color:#c88524; }
@@ -70,7 +71,8 @@
     const messages = {
       zh: { brand:'文件分享', loading:'正在加载…', missing:'分享链接不存在', gone:'分享已失效', expired:'分享已过期', maxed:'访问次数已达上限',
         path:'文件夹', count:'{n} 个文件', size:'共 {n}', access:'查看文件', password:'访问密码', open:'验证并查看',
-        all:'下载全部', stop:'停止后续下载', file:'文件', sizeCol:'大小', action:'操作', download:'下载', empty:'此文件夹暂无文件',
+        all:'下载全部', stop:'停止后续下载', file:'文件', sizeCol:'大小', action:'操作', download:'下载', copyLink:'复制链接',
+        copyDone:'已复制', copied:'链接已复制，有效期至 {time}', copyFailed:'复制失败，请检查浏览器剪贴板权限', empty:'此文件夹暂无文件',
         unsupported:'大文件已交由浏览器下载列表，请在那里查看实际进度。',
         destination:'文件会分别保存到浏览器默认下载目录。子目录路径会写入文件名。浏览器可能要求允许多个文件下载。',
         preparing:'正在准备下载…', progress:'已处理 {files} / {count} 个文件 · 已读取 {done} / {total}', finished:'下载队列已完成',
@@ -78,7 +80,8 @@
         turnstile:'请完成人机验证', login:'使用 {provider} 登录', retry:'重试' },
       en: { brand:'File Share', loading:'Loading…', missing:'Share link not found', gone:'Share revoked', expired:'Share expired', maxed:'Access limit reached',
         path:'Folder', count:'{n} files', size:'Total {n}', access:'View files', password:'Password', open:'Verify and view',
-        all:'Download all', stop:'Stop next downloads', file:'File', sizeCol:'Size', action:'Action', download:'Download', empty:'This folder is empty',
+        all:'Download all', stop:'Stop next downloads', file:'File', sizeCol:'Size', action:'Action', download:'Download',
+        copyLink:'Copy link', copyDone:'Copied', copied:'Link copied, valid until {time}', copyFailed:'Copy failed. Check browser clipboard permissions.', empty:'This folder is empty',
         unsupported:'Large files are in your browser download list. Check their progress there.',
         destination:'Files go separately to your browser\'s default download folder. Subfolder paths are included in file names. Your browser may ask to allow multiple downloads.',
         preparing:'Preparing downloads…', progress:'Handled {files} / {count} files · Read {done} / {total}', finished:'Download queue finished',
@@ -156,10 +159,11 @@
       $('stop').onclick=()=>{stopAfterCurrent=true;};
       const dirs=manifest.directories.map(path=>`<tr><td class="path"><span class="file-icon dir-icon">▸</span>${esc(path)}/</td><td></td><td></td></tr>`).join('');
       const files=manifest.files.map((file,index)=>`<tr><td class="path"><span class="file-icon">▣</span>${esc(file.path)}</td>
-        <td class="muted">${fmtSize(file.size)}</td><td><button class="small" type="button" data-file="${index}">${esc(t('download'))}</button></td></tr>`).join('');
+        <td class="muted">${fmtSize(file.size)}</td><td><span class="row-actions"><button class="small" type="button" data-copy="${index}">${esc(t('copyLink'))}</button><button class="small" type="button" data-file="${index}">${esc(t('download'))}</button></span></td></tr>`).join('');
       $('contents').innerHTML=files||dirs?`<table class="table"><thead><tr><th>${esc(t('file'))}</th><th>${esc(t('sizeCol'))}</th><th>${esc(t('action'))}</th></tr></thead><tbody>${dirs}${files}</tbody></table>`
         :`<div class="empty">${esc(t('empty'))}</div>`;
       document.querySelectorAll('[data-file]').forEach(button=>button.onclick=()=>downloadOne(manifest.files[Number(button.dataset.file)]));
+      document.querySelectorAll('[data-copy]').forEach(button=>button.onclick=()=>copyLink(manifest.files[Number(button.dataset.copy)],button));
       notice(t('destination'));
     }
     function fileUrl(file) {
@@ -167,6 +171,31 @@
       url.searchParams.set('t',ticket);
       url.searchParams.set('dl',crypto.randomUUID());
       return url.href;
+    }
+    async function copyLink(file,button) {
+      const url=fileUrl(file);
+      try {
+        if (navigator.clipboard?.writeText) {
+          try { await navigator.clipboard.writeText(url); }
+          catch { copyWithSelection(url); }
+        } else copyWithSelection(url);
+        button.textContent=t('copyDone');
+        setTimeout(()=>{ if(button.isConnected) button.textContent=t('copyLink'); },2000);
+        const expires=Number(ticket.split('.')[0]);
+        notice(t('copied',{time:new Date(expires).toLocaleString('zh-CN')}));
+      } catch {
+        notice(t('copyFailed'),true);
+      }
+    }
+    function copyWithSelection(value) {
+      const field=document.createElement('textarea');
+      field.value=value;
+      field.style.position='fixed';
+      field.style.opacity='0';
+      document.body.append(field);
+      field.select();
+      try { if(!document.execCommand('copy')) throw new Error('copy_failed'); }
+      finally { field.remove(); }
     }
     function trigger(file) {
       const a=document.createElement('a');
